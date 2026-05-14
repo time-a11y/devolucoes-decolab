@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Devoluções NF-e | Conferência e Gestão</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <style>
     :root{
       --bg:#f4f7fb;
@@ -238,6 +240,19 @@
       .topbar{display:grid}
       .steps{grid-template-columns:1fr}
     }
+
+
+    .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.55);display:grid;place-items:center;padding:22px;z-index:1000}
+    .modal{width:min(980px,100%);max-height:92vh;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:24px;box-shadow:0 25px 80px rgba(15,23,42,.32);padding:24px}
+    .modal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}
+    .modal-header h2{margin:0 0 8px;font-size:26px;letter-spacing:-.04em}.modal-header p{margin:0;color:var(--muted)}
+    .qr-card{display:grid;grid-template-columns:300px 1fr;gap:24px;align-items:center}
+    .qr-box{min-height:280px;display:grid;place-items:center;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:18px;padding:12px}
+    .qr-box img,.qr-box canvas{max-width:260px;max-height:260px}
+    .sync-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800;background:#eff6ff;color:#1d4ed8}
+    .sync-pill.ok{background:#dcfce7;color:#166534}
+    .sync-pill.err{background:#fee2e2;color:#991b1b}
+    @media(max-width:720px){.qr-card{grid-template-columns:1fr}.qr-box{min-height:220px}}
     @media print{
       body{background:#fff}
       .sidebar,.topbar,.no-print,.btn,.tabs{display:none!important}
@@ -247,9 +262,6 @@
       .print-only{display:block}
     }
   </style>
-
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -1452,6 +1464,11 @@ function renderInspectionItem(ret,item){
         </div>
         <div class="field">
           <label>Evidências</label>
+          <div class="row-actions" style="margin-bottom:8px">
+            <button type="button" class="btn small" onclick="openEvidenceQr('item','${ret.id}','${item.id}','Produto recebido')">Enviar pelo celular via QR Code</button>
+            <button type="button" class="btn small" onclick="openEvidenceQr('item','${ret.id}','${item.id}','Produto avariado')">Foto da avaria</button>
+            <button type="button" class="btn small" onclick="openEvidenceQr('item','${ret.id}','${item.id}','Embalagem')">Foto da embalagem</button>
+          </div>
           <input type="file" multiple accept="image/*,video/*,.pdf" onchange="handleEvidenceUpload(this,'${ret.id}','${item.id}')">
         </div>
       </div>
@@ -1512,12 +1529,15 @@ function handleEvidenceUpload(input, retId, itemId){
 
 function renderEvidence(list){
   if(!list.length) return '<p class="hint">Nenhuma evidência anexada para este item.</p>';
-  return `<div class="evidence-grid">${list.map(ev => `
-    <div class="evidence">
-      <strong>${esc(ev.name)}</strong><br>
-      <span class="hint">${Math.round((ev.size || 0)/1024)} KB · ${esc(ev.uploadedBy || '-')}</span>
-      ${ev.preview ? `<img src="${ev.preview}" alt="Evidência">` : ''}
-    </div>`).join('')}</div>`;
+  return `<div class="evidence-grid">${list.map(ev => {
+    const src = ev.preview || ev.thumbnail_url || ev.file_url || ev.public_url || ev.url || '';
+    const isImg = src && String(ev.type || ev.mime_type || '').startsWith('image/');
+    return `<div class="evidence">
+      <strong>${esc(ev.name || ev.original_name || ev.file_name || 'Evidência')}</strong><br>
+      <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${ev.uploaded_from==='mobile_qr'?'· QR Code':''}</span>
+      ${isImg ? `<img src="${esc(src)}" alt="Evidência">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : '')}
+    </div>`;
+  }).join('')}</div>`;
 }
 
 function goDestination(retId){
@@ -1987,1614 +2007,237 @@ function downloadReturnCsv(retId){
 }
 
 
-/* ===== Atualização local: Estoque por SKU + correção controlada de devoluções ===== */
-(function(){
-  const extraStyle = document.createElement('style');
-  extraStyle.textContent = `
-    .tabbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 18px}
-    .tabbar button{border:1px solid var(--line);background:#fff;border-radius:12px;padding:10px 12px;font-weight:800;color:#475467}
-    .tabbar button.active{background:linear-gradient(135deg,var(--primary),var(--primary-2));color:#fff;border-color:transparent}
-    .qty-diff{font-weight:900;border-radius:999px;padding:4px 8px;display:inline-flex;font-size:12px}
-    .qty-diff.pos{background:#ffedd5;color:#9a3412}.qty-diff.neg{background:#fee2e2;color:#991b1b}.qty-diff.ok{background:#dcfce7;color:#166534}
-    .sku-modal{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:80;display:grid;place-items:center;padding:20px}
-    .sku-modal .modal-card{background:#fff;border-radius:22px;box-shadow:var(--shadow);width:min(1180px,100%);max-height:92vh;overflow:auto;padding:22px}
-    .wide-table{min-width:1450px}.sticky-first{position:sticky;left:0;background:#fff;z-index:2}
-    .correction-box{border:1px dashed #f59e0b;background:#fffbeb;border-radius:16px;padding:14px;margin:12px 0}
-  `;
-  document.head.appendChild(extraStyle);
+// =============================
+// Supabase evidence sync + QR Code
+// =============================
+const SUPABASE_URL = 'https://wiehiqiuojcwcrnikiqs.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZWhpcWl1b2pjd2NybmlraXFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjMyMTMsImV4cCI6MjA5NDMzOTIxM30.BFdyC9R39D8KkMTUe6_MAxjuvs8igNhj9FT87d1Ilj8';
+let sbClient = null;
+let qrPollingTimer = null;
+let globalEvidenceSyncTimer = null;
+let lastEvidenceSyncAt = 0;
 
-  function migrateSkuCorrectionLocal(){
-    state.stockView = state.stockView || 'sku';
-    state.correctionDrafts = state.correctionDrafts || [];
-    state.returns.forEach(ret => {
-      ret.revisionNumber = ret.revisionNumber || 1;
-      ret.corrections = ret.corrections || [];
-      (ret.items || []).forEach(item => normalizeQtyFields(item));
-    });
-  }
+function getSupabaseClient(){
+  if(sbClient) return sbClient;
+  if(!window.supabase){ console.warn('Supabase SDK não carregado.'); return null; }
+  sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return sbClient;
+}
 
-  window.normalizeQtyFields = function(item){
-    const invoiceQty = Number(item.invoice_quantity ?? item.expectedQty ?? item.soldQty ?? 0);
-    const physicalQty = item.physical_received_quantity ?? item.receivedQty;
-    item.invoice_quantity = invoiceQty;
-    item.physical_received_quantity = physicalQty === '' || physicalQty === undefined || physicalQty === null ? '' : Number(physicalQty);
-    item.approved_quantity = Number(item.approved_quantity ?? Math.min(Number(item.physical_received_quantity || 0), invoiceQty));
-    item.blocked_quantity = Number(item.blocked_quantity ?? Math.max(Number(item.physical_received_quantity || 0) - item.approved_quantity, 0));
-    item.quantity_difference = item.physical_received_quantity === '' ? 0 : Number(item.physical_received_quantity || 0) - invoiceQty;
-    item.invoice_sku = item.invoice_sku || item.sku || '';
-    item.physical_sku = item.physical_sku || item.sku || '';
-    item.invoice_ean = item.invoice_ean || item.ean || '';
-    item.physical_ean = item.physical_ean || item.ean || '';
-    item.invoice_product_name = item.invoice_product_name || item.description || '';
-    item.physical_product_name = item.physical_product_name || item.description || '';
-    item.quantity_status = item.quantity_difference > 0 ? 'Quantidade maior que NF-e' : item.quantity_difference < 0 ? 'Quantidade menor que NF-e' : 'Quantidade conforme NF-e';
-    item.is_corrected = !!item.is_corrected;
-    item.correction_status = item.correction_status || '';
-    item.sku_group_key = item.physical_sku || item.invoice_sku || item.sku || 'SEM-SKU';
-    item.receivedQty = item.physical_received_quantity;
-    item.expectedQty = item.invoice_quantity;
-    return item;
-  }
+function randomToken(len=36){
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(b => (b % 36).toString(36)).join('') + Date.now().toString(36);
+}
 
-  const originalSave = save;
-  window.save = function(){
-    localStorage.setItem(APP_KEY, JSON.stringify({
-      users: state.users,
-      session: state.session,
-      route: state.route,
-      currentReturnId: state.currentReturnId,
-      returns: state.returns,
-      audit: state.audit,
-      rules: state.rules,
-      filters: state.filters,
-      stockView: state.stockView,
-      correctionDrafts: state.correctionDrafts
-    }));
+function currentUserName(){ return state.session?.name || 'Usuário'; }
+function currentUserRole(){ return state.session?.role || 'Sistema'; }
+
+function evidenceExists(id){
+  return state.returns.some(r => (r.items||[]).some(i => (i.evidences||[]).some(e => e.id === id || e.supabase_id === id)));
+}
+
+function normalizeRemoteEvidence(row){
+  return {
+    id: row.id,
+    supabase_id: row.id,
+    name: row.original_name || row.file_name || 'Evidência',
+    type: row.mime_type || row.type || 'arquivo',
+    size: row.file_size || 0,
+    uploadedBy: row.uploaded_by || 'Celular / QR Code',
+    uploadedAt: row.created_at || nowIso(),
+    preview: row.thumbnail_url || row.file_url || row.public_url || '',
+    file_url: row.file_url || row.public_url || '',
+    thumbnail_url: row.thumbnail_url || '',
+    category: row.category || row.evidence_type || '',
+    uploaded_from: row.uploaded_from || 'supabase',
+    upload_token: row.upload_token || ''
   };
+}
 
-  migrateSkuCorrectionLocal();
-
-  const oldRenderSidebar = renderSidebar;
-  window.renderSidebar = function(){
-    const items = [
-      ['dashboard','Painel','▦','reports'],
-      ['nova','Nova devolução','＋','create_return'],
-      ['devolucoes','Devoluções','▤','reports'],
-      ['estoque','Estoque Devolvido','▥','stock'],
-      ['relatorios','Relatórios','◷','reports'],
-      ['auditoria','Auditoria','⎋','audit'],
-      ['configuracoes','Configurações','⚙','settings']
-    ].filter(i => hasPermission(i[3]));
-    return `
-      <aside class="sidebar">
-        <div class="logo"><div class="logo-mark">NF</div><span>ReturnFlow</span></div>
-        <nav class="nav">
-          ${items.map(([route,label,icon]) => `<button class="${state.route===route?'active':''}" onclick="nav('${route}')"><span>${icon}</span>${label}</button>`).join('')}
-        </nav>
-        <div class="side-footer">
-          <div class="user-mini">
-            <div class="avatar">${esc(state.session.name.slice(0,1))}</div>
-            <div><strong>${esc(state.session.name)}</strong><br><span class="hint">${esc(state.session.role)}</span></div>
-          </div>
-          <button class="btn ghost small" style="width:100%;margin-top:14px" onclick="logout()">Sair</button>
-        </div>
-      </aside>`;
-  };
-
-  window.renderTopbar = function(){
-    const titles = {
-      dashboard:'Dashboard operacional', nova:'Nova devolução', devolucoes:'Devoluções', estoque:'Estoque Devolvido', relatorios:'Relatórios', auditoria:'Trilha de auditoria', configuracoes:'Configurações'
-    };
-    const subtitles = {
-      dashboard:'Acompanhe volume, divergências, perdas e status dos processos.',
-      nova:'Inicie pela chave da NF-e ou por upload do XML.',
-      devolucoes:'Consulte, abra e finalize processos de devolução.',
-      estoque:'Visualize o estoque devolvido por SKU, item, localização ou destino.',
-      relatorios:'Exporte dados para auditoria, financeiro e marketplaces.',
-      auditoria:'Histórico imutável de ações relevantes.',
-      configuracoes:'Regras de negócio, permissões e parâmetros do sistema.'
-    };
-    return `
-      <header class="topbar no-print">
-        <div><h1>${titles[state.route] || 'Aplicativo'}</h1><p>${subtitles[state.route] || ''}</p></div>
-        <div class="searchbar">
-          <input placeholder="Buscar pedido, SKU, cliente, NF-e..." value="${esc(state.filters.returnSearch)}" oninput="state.filters.returnSearch=this.value; save(); if(state.route==='estoque') render()">
-          <button class="btn primary" onclick="nav('nova')">Nova devolução</button>
-        </div>
-      </header>`;
-  };
-
-  const oldRenderRoute = renderRoute;
-  window.renderRoute = function(){
-    if(state.route === 'estoque') return renderReturnedStock();
-    return oldRenderRoute();
-  };
-
-  window.renderItemsTable = function(ret, editable=true){
-    (ret.items||[]).forEach(normalizeQtyFields);
-    return `
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Produto</th><th>SKU / EAN</th><th>Qtd NF-e</th><th>Qtd física</th><th>Diferença</th><th>Status</th><th>Destino</th></tr></thead>
-          <tbody>${ret.items.map(item => {
-            const diffClass = item.quantity_difference > 0 ? 'pos' : item.quantity_difference < 0 ? 'neg' : 'ok';
-            return `<tr>
-              <td><strong>${esc(item.physical_product_name || item.description)}</strong><br><span class="hint">NF-e: ${esc(item.invoice_product_name || item.description)} · ${money(item.totalValue)}</span></td>
-              <td>${esc(item.physical_sku || item.sku || '-')}<br><span class="hint">${esc(item.physical_ean || item.ean || '-')}</span></td>
-              <td>${num(item.invoice_quantity)} ${esc(item.unit || '')}</td>
-              <td>${editable ? `<input type="number" min="0" step="0.0001" value="${esc(item.physical_received_quantity)}" onchange="updateItem('${ret.id}','${item.id}','physical_received_quantity',this.value)">` : esc(item.physical_received_quantity || '0')}</td>
-              <td><span class="qty-diff ${diffClass}">${item.quantity_difference > 0 ? '+' : ''}${num(item.quantity_difference)}</span><br><span class="hint">${esc(item.quantity_status)}</span></td>
-              <td>${editable ? renderConferenceStatusSelect(ret.id,item) : esc(item.conferenceStatus)}</td>
-              <td>${destBadge(item.destination)}</td>
-            </tr>`;
-          }).join('')}</tbody>
-        </table>
-      </div>`;
-  };
-
-  window.updateItem = function(retId,itemId,field,value){
-    const ret = getReturn(retId);
-    const item = ret?.items.find(i => i.id === itemId);
-    if(!item) return;
-    if(field === 'receivedQty') field = 'physical_received_quantity';
-    item[field] = ['physical_received_quantity','invoice_quantity','approved_quantity','blocked_quantity'].includes(field) && value !== '' ? Number(value) : value;
-    if(field === 'physical_received_quantity'){
-      item.receivedQty = item.physical_received_quantity;
-      normalizeQtyFields(item);
-      const rq = Number(item.physical_received_quantity || 0);
-      if(value !== ''){
-        if(rq === Number(item.invoice_quantity)) item.conferenceStatus = 'Produto recebido corretamente';
-        if(rq < Number(item.invoice_quantity)) item.conferenceStatus = rq === 0 ? 'Produto não recebido' : 'Produto recebido parcialmente';
-        if(rq > Number(item.invoice_quantity)) item.conferenceStatus = 'Produto recebido parcialmente';
-      }
-    } else {
-      normalizeQtyFields(item);
+function mergeRemoteEvidence(row){
+  if(!row || !row.id || evidenceExists(row.id)) return false;
+  const retId = row.return_id;
+  const itemId = row.return_item_id;
+  const ret = retId ? getReturn(retId) : null;
+  if(ret && itemId){
+    const item = (ret.items || []).find(i => i.id === itemId);
+    if(item){
+      item.evidences = item.evidences || [];
+      item.evidences.push(normalizeRemoteEvidence(row));
+      addReturnAudit(ret, 'Evidência recebida via QR Code', `${row.original_name || row.file_name || 'arquivo'} no SKU ${item.sku || '-'}`);
+      return true;
     }
-    ret.updatedAt = nowIso();
-    addReturnAudit(ret, 'Item atualizado', `${item.sku}: ${field} = ${value}`);
-    evaluateConference(ret);
-    save(); render();
-  };
+  }
+  if(ret && (ret.items || []).length){
+    const item = ret.items[0];
+    item.evidences = item.evidences || [];
+    item.evidences.push(normalizeRemoteEvidence(row));
+    addReturnAudit(ret, 'Evidência recebida via QR Code', row.original_name || row.file_name || 'arquivo');
+    return true;
+  }
+  return false;
+}
 
-  window.updateItemNoRender = function(retId,itemId,field,value){
-    const ret = getReturn(retId);
-    const item = ret?.items.find(i => i.id === itemId);
-    if(!item) return;
-    item[field] = value;
-    normalizeQtyFields(item);
-    ret.updatedAt = nowIso();
+async function fetchSupabaseEvidences(options={}){
+  const sb = getSupabaseClient();
+  if(!sb) return {merged:0,error:'SDK Supabase não carregado'};
+  try{
+    let q = sb.from('evidence_files').select('*').order('created_at',{ascending:false}).limit(300);
+    if(options.token) q = q.eq('upload_token', options.token);
+    const {data,error} = await q;
+    if(error) throw error;
+    let merged = 0;
+    (data || []).forEach(row => { if(mergeRemoteEvidence(row)) merged++; });
+    if(merged){
+      save();
+      if(options.rerender !== false) render();
+    }
+    lastEvidenceSyncAt = Date.now();
+    return {merged,data:data||[]};
+  }catch(e){
+    console.warn('Falha ao sincronizar evidências Supabase:', e.message || e);
+    return {merged:0,error:e.message || String(e)};
+  }
+}
+
+function initSupabaseEvidenceSync(){
+  if(globalEvidenceSyncTimer) return;
+  setTimeout(()=>fetchSupabaseEvidences({rerender:false}), 1500);
+  globalEvidenceSyncTimer = setInterval(()=>{
+    if(state.session) fetchSupabaseEvidences({rerender:false});
+  }, 12000);
+}
+
+async function openEvidenceQr(contextType, returnId='', itemId='', category='Produto recebido'){
+  const sb = getSupabaseClient();
+  if(!sb){ alert('Supabase não carregado. Atualize a página e tente novamente.'); return; }
+  const ret = returnId ? getReturn(returnId) : null;
+  const item = ret && itemId ? (ret.items || []).find(i => i.id === itemId) : null;
+  const token = randomToken(40);
+  const expires = new Date(Date.now() + 15*60*1000).toISOString();
+  const baseUrl = location.origin + location.pathname.replace(/index\.html?$/,'');
+  const uploadUrl = baseUrl + 'mobile-upload.html?token=' + encodeURIComponent(token);
+  const payload = {
+    token,
+    context_type: contextType || 'return',
+    context_id: itemId || returnId || '',
+    return_id: returnId || null,
+    return_item_id: itemId || null,
+    returned_stock_id: null,
+    transfer_id: null,
+    movement_id: null,
+    category,
+    created_by: currentUserName(),
+    created_at: nowIso(),
+    expires_at: expires,
+    used_at: null,
+    status: 'active',
+    max_uploads: 20,
+    upload_count: 0,
+    metadata_json: {
+      return_code: ret?.code || '',
+      order_number: ret?.orderNumber || '',
+      sku: item?.sku || '',
+      product_name: item?.description || '',
+      invoice_number: ret?.invoice?.number || ''
+    }
+  };
+  try{
+    const {error} = await sb.from('qr_upload_tokens').insert(payload);
+    if(error) throw error;
+    renderQrModal({token, uploadUrl, ret, item, category, expires});
+    addAudit('QR Code de evidência criado', 'evidencia', token, `${ret?.code || ''} ${item?.sku || ''}`);
     save();
-  };
-
-  window.evaluateConference = function(ret){
-    const alerts = validateReturn(ret);
-    ret.items.forEach(item => {
-      normalizeQtyFields(item);
-      if(item.physical_received_quantity !== '' && item.quantity_difference < 0){
-        alerts.push({level:'Crítica', message:`Quantidade física menor que a NF-e para o SKU ${item.sku}. Diferença: ${item.quantity_difference}.`});
-      }
-      if(item.physical_received_quantity !== '' && item.quantity_difference > 0){
-        alerts.push({level:'Média', message:`Quantidade física maior que a NF-e para o SKU ${item.sku}. Diferença: +${item.quantity_difference}. Excedente exige análise.`});
-      }
-      if((item.conferenceStatus || '').includes('diferente')) alerts.push({level:'Crítica', message:`Produto recebido não corresponde ao SKU esperado: ${item.sku}.`});
-      if((item.conferenceStatus || '').includes('avaria')) alerts.push({level:'Média', message:`Produto apresenta avaria informada na conferência: ${item.sku}.`});
-      if((item.conferenceStatus || '').includes('sem embalagem')) alerts.push({level:'Média', message:`Embalagem original ausente para o SKU ${item.sku}.`});
-    });
-    ret.alerts = dedupeAlerts(alerts);
-    const allConferred = ret.items.every(i => i.physical_received_quantity !== '' && i.conferenceStatus !== 'Pendente');
-    if(allConferred && ret.status === 'Em conferência') ret.status = ret.alerts.some(a => ['Crítica','Média'].includes(a.level)) ? 'Conferência com divergência' : 'Em conferência';
-  };
-
-  window.markAllReceived = function(retId){
-    const ret = getReturn(retId);
-    ret.items.forEach(item => { item.physical_received_quantity = item.invoice_quantity || item.expectedQty; item.receivedQty = item.physical_received_quantity; normalizeQtyFields(item); item.conferenceStatus = 'Produto recebido corretamente'; });
-    evaluateConference(ret); addReturnAudit(ret, 'Conferência automática', 'Todos os itens marcados conforme NF-e'); render();
-  };
-
-  window.scanBarcode = function(retId){
-    const input = document.getElementById('barcodeInput');
-    const code = cleanDigits(input.value);
-    if(!code){ alert('Informe o EAN.'); return; }
-    const ret = getReturn(retId);
-    const item = ret.items.find(i => cleanDigits(i.ean) === code || cleanDigits(i.physical_ean) === code);
-    if(!item){
-      ret.alerts = dedupeAlerts([...(ret.alerts || []), {level:'Crítica', message:`Código de barras ${code} não localizado na NF-e.`}]);
-      addReturnAudit(ret, 'EAN não localizado', code); render(); return;
-    }
-    const current = Number(item.physical_received_quantity || 0);
-    item.physical_received_quantity = current + 1;
-    item.receivedQty = item.physical_received_quantity;
-    normalizeQtyFields(item);
-    item.conferenceStatus = item.quantity_difference === 0 ? 'Produto recebido corretamente' : 'Produto recebido parcialmente';
-    evaluateConference(ret); addReturnAudit(ret, 'EAN lido', `${code} vinculado ao SKU ${item.sku}. Qtd física: ${item.physical_received_quantity}`); render();
-  };
-
-  window.decideDestination = function(item){
-    normalizeQtyFields(item);
-    const status = (item.conferenceStatus || '').toLowerCase();
-    const phy = (item.physicalCondition || '').toLowerCase();
-    const pack = (item.packageCondition || '').toLowerCase();
-    const packAction = (item.packageAction || '').toLowerCase();
-    if(item.quantity_difference > 0) return {destination:'Análise manual', reason:'Quantidade física maior que a NF-e. Excedente bloqueado para análise/quarentena.'};
-    if(status.includes('diferente') || status.includes('não recebido') || item.quantity_difference < 0) return {destination:'Contestação', reason:'Produto ausente, divergente ou quantidade recebida inferior ao esperado.'};
-    if(status.includes('incompleto') || status.includes('acessórios faltantes') || phy.includes('peça faltante')) return {destination:'Contestação', reason:'Produto incompleto ou com acessórios faltantes.'};
-    if(phy.includes('sem condições') || phy.includes('quebrado') || phy.includes('molhado') || phy.includes('odor')) return {destination:'Descarte', reason:'Condição física impede revenda segura.'};
-    if(status.includes('avaria') || status.includes('usado') || phy.includes('sinais de uso') || phy.includes('rasgado') || phy.includes('manchado') || phy.includes('fora do padrão')) return {destination:'Quarentena', reason:'Item precisa de análise complementar antes de qualquer movimentação.'};
-    if(packAction.includes('reembalagem') || packAction.includes('substituir') || pack.includes('rasgada') || pack.includes('suja') || pack.includes('sem etiqueta') || pack.includes('sem embalagem') || pack.includes('incompatível')) return {destination:'Reparo/Reembalagem', reason:'Produto vendável, mas embalagem precisa de correção.'};
-    if(pack.includes('molhada')) return {destination:'Quarentena', reason:'Embalagem molhada exige retenção e avaliação de risco.'};
-    if(status.includes('corretamente') && item.quantity_difference === 0 && (phy.includes('intacto') || !phy) && (pack.includes('lacrada') || pack.includes('reaproveitável') || pack.includes('presente') || !pack)) return {destination:'Reabastecimento', reason:'Quantidade correta, item íntegro e embalagem adequada.'};
-    return {destination:'Análise manual', reason:'Dados insuficientes para decisão automática segura.'};
-  };
-
-  const oldRenderInspectionItem = renderInspectionItem;
-  window.renderInspectionItem = function(ret,item){
-    normalizeQtyFields(item);
-    const diffClass = item.quantity_difference > 0 ? 'pos' : item.quantity_difference < 0 ? 'neg' : 'ok';
-    return oldRenderInspectionItem(ret,item).replace(
-      `<span class="hint">${esc(item.sku)} · EAN ${esc(item.ean || '-')} · Qtd recebida ${esc(item.receivedQty || '0')}/${esc(item.expectedQty)}</span>`,
-      `<span class="hint">${esc(item.sku)} · EAN ${esc(item.ean || '-')} · NF-e ${num(item.invoice_quantity)} · Físico ${num(item.physical_received_quantity || 0)} · <span class="qty-diff ${diffClass}">${item.quantity_difference>0?'+':''}${num(item.quantity_difference)}</span></span>`
-    );
-  };
-
-  const oldRenderSummary = renderSummary;
-  window.renderSummary = function(ret){
-    const canCorrect = ['Administrador','Supervisor','Auditor'].includes(state.session.role);
-    const html = oldRenderSummary(ret);
-    const correction = canCorrect ? `<button class="btn warning" onclick="startCorrection('${ret.id}')">Corrigir devolução</button>` : '';
-    return html.replace(`<button class="btn primary" onclick="finalizeReturn('${ret.id}')">Finalizar processo</button>`, `<button class="btn primary" onclick="finalizeReturn('${ret.id}')">Finalizar processo</button>${correction}`);
-  };
-
-  window.startCorrection = function(retId){
-    const ret = getReturn(retId);
-    if(!ret) return;
-    if(!['Administrador','Supervisor','Auditor'].includes(state.session.role)){ alert('Ação restrita.'); return; }
-    const reason = prompt('Informe o motivo obrigatório da correção:');
-    if(!reason || !reason.trim()) return;
-    const oldSnapshot = JSON.parse(JSON.stringify(ret));
-    ret.corrections = ret.corrections || [];
-    ret.revisionNumber = Number(ret.revisionNumber || 1) + 1;
-    ret.correctionReason = reason.trim();
-    ret.correctionStartedAt = nowIso();
-    ret.correctionStartedBy = state.session.name;
-    ret.corrections.unshift({id:uid('corr'), revisionNumber:ret.revisionNumber, requestedBy:state.session.name, correctionReason:reason.trim(), status:'Em edição', oldValues:oldSnapshot, createdAt:nowIso()});
-    ret.status = 'Correção em andamento';
-    addReturnAudit(ret, 'Correção iniciada', `Revisão ${ret.revisionNumber}: ${reason}`);
-    state.currentReturnId = ret.id; state.route='nova'; render();
-  };
-
-  const oldWorkflowStep = workflowStep;
-  window.workflowStep = function(ret){
-    if(ret.status === 'Correção em andamento') return 1;
-    return oldWorkflowStep(ret);
-  };
-
-  const oldFinalizeReturn = finalizeReturn;
-  window.finalizeReturn = function(retId){
-    const ret = getReturn(retId);
-    if(ret?.status === 'Correção em andamento'){
-      ret.items.forEach(normalizeQtyFields);
-      const current = ret.corrections?.[0];
-      if(current){ current.status='Finalizada'; current.finalizedAt=nowIso(); current.newValues=JSON.parse(JSON.stringify(ret)); current.impactSummary='Estoque devolvido, indicadores e visão por SKU recalculados pela quantidade física.'; }
-      ret.status = aggregateStatus(ret) || 'Finalizado';
-      ret.finishedAt = nowIso();
-      addReturnAudit(ret, 'Correção finalizada', `Revisão ${ret.revisionNumber} concluída e estoque recalculado.`);
-      render(); return;
-    }
-    oldFinalizeReturn(retId);
-  };
-
-  function allStockRows(){
-    const rows = [];
-    state.returns.filter(r=>r.status!=='Cancelado').forEach(ret=>{
-      (ret.items||[]).forEach(item=>{
-        normalizeQtyFields(item);
-        const qty = Number(item.physical_received_quantity || 0);
-        if(qty <= 0 && !['Finalizado','Aprovado para estoque','Quarentena','Descarte','Contestação','Reparo/Reembalagem','Correção em andamento'].includes(ret.status)) return;
-        const finalDest = item.destination || 'Aguardando decisão';
-        rows.push({ret,item,qty,sku:item.sku_group_key,ean:item.physical_ean||item.ean,product:item.physical_product_name||item.description,destination:finalDest,location:item.location || defaultLocationForDest(finalDest),availability:availabilityForDest(finalDest,item),value:Number(item.unitValue||0)*qty,days:daysSince(ret.receivedAt||ret.createdAt)});
-      });
-    });
-    return rows;
+    startQrPolling(token);
+  }catch(e){
+    alert('Não foi possível gerar o QR Code: ' + (e.message || e));
   }
-  window.allStockRows = allStockRows;
+}
 
-  function defaultLocationForDest(dest){
-    if(dest === 'Reabastecimento') return 'Estoque principal';
-    if(dest === 'Quarentena') return 'Quarentena';
-    if(dest === 'Descarte') return 'Descarte';
-    if(dest === 'Reparo/Reembalagem') return 'Reembalagem';
-    if(dest === 'Contestação') return 'Aguardando marketplace';
-    return 'Área de devoluções';
-  }
-  function availabilityForDest(dest,item){
-    if(dest === 'Reabastecimento' && Number(item.quantity_difference||0)===0) return 'Disponível para venda';
-    if(dest === 'Descarte') return 'Baixado por descarte';
-    if(dest === 'Contestação') return 'Bloqueado por contestação';
-    if(dest === 'Quarentena') return 'Bloqueado por quarentena';
-    if(dest === 'Reparo/Reembalagem') return 'Bloqueado por falta de embalagem';
-    return 'Bloqueado para venda';
-  }
-  function daysSince(v){ const d=new Date(v); return Number.isNaN(d.getTime())?0:Math.max(0,Math.floor((new Date()-d)/86400000)); }
-
-  function aggregateBySku(rows){
-    const map = new Map();
-    rows.forEach(r=>{
-      const key = r.sku || 'SEM-SKU';
-      if(!map.has(key)) map.set(key,{sku:key,ean:r.ean,product:r.product,variation:r.item.variation||'',category:r.item.category||'',total:0,value:0,reabastecimento:0,quarentena:0,reparo:0,reembalagem:0,descarte:0,contestacao:0,transferencia:0,outlet:0,perda:0,retornoFornecedor:0,aguardando:0,available:0,blocked:0,lastReturnAt:'',returns:new Set(),days:[],rows:[]});
-      const g = map.get(key); g.total += r.qty; g.value += r.value; g.returns.add(r.ret.id); g.days.push(r.days); g.rows.push(r); if(!g.lastReturnAt || new Date(r.ret.receivedAt||r.ret.createdAt)>new Date(g.lastReturnAt)) g.lastReturnAt = r.ret.receivedAt||r.ret.createdAt;
-      const d = (r.destination||'').toLowerCase();
-      if(d.includes('reabastecimento')) g.reabastecimento += r.qty;
-      else if(d.includes('quarentena')) g.quarentena += r.qty;
-      else if(d.includes('reparo')) g.reparo += r.qty;
-      else if(d.includes('reembalagem')) g.reembalagem += r.qty;
-      else if(d.includes('descarte')) g.descarte += r.qty;
-      else if(d.includes('contest')) g.contestacao += r.qty;
-      else if(d.includes('transfer')) g.transferencia += r.qty;
-      else if(d.includes('outlet')) g.outlet += r.qty;
-      else if(d.includes('perda')) g.perda += r.qty;
-      else if(d.includes('fornecedor')) g.retornoFornecedor += r.qty;
-      else g.aguardando += r.qty;
-      if(r.availability === 'Disponível para venda') g.available += r.qty; else g.blocked += r.qty;
-    });
-    return [...map.values()].map(g=>({...g,relatedReturnsCount:g.returns.size,avgDays:g.days.length?Math.round(g.days.reduce((a,b)=>a+b,0)/g.days.length):0}));
-  }
-  window.aggregateBySku = aggregateBySku;
-
-  window.renderReturnedStock = function(){
-    const view = state.stockView || 'sku';
-    const rows = filterStockRows(allStockRows());
-    const skuAgg = aggregateBySku(rows);
-    const totalUnits = rows.reduce((s,r)=>s+r.qty,0);
-    const blocked = rows.filter(r=>r.availability!=='Disponível para venda').reduce((s,r)=>s+r.qty,0);
-    const quarantine = rows.filter(r=>r.destination==='Quarentena').reduce((s,r)=>s+r.qty,0);
-    const disc = rows.filter(r=>r.destination==='Descarte').reduce((s,r)=>s+r.qty,0);
-    return `
-      <section class="grid cols-4">
-        ${metricCard('SKUs com devolução', skuAgg.length, 'Produtos consolidados', 'SKU')}
-        ${metricCard('Unidades devolvidas', num(totalUnits), 'Quantidade física recebida', '▥')}
-        ${metricCard('Unidades bloqueadas', num(blocked), 'Quarentena, contestação, descarte ou análise', '⚠')}
-        ${metricCard('Valor devolvido', money(rows.reduce((s,r)=>s+r.value,0)), 'Base física recebida', 'R$')}
-      </section>
-      <div class="card" style="margin-top:18px">
-        <div class="split"><div><h2>Estoque Devolvido</h2><p>Alterne entre visões operacionais. A visão por SKU consolida as quantidades por situação.</p></div><div class="row-actions"><button class="btn" onclick="exportSkuStockCsv()">Exportar SKU CSV</button><button class="btn" onclick="window.print()">Imprimir / PDF</button></div></div>
-        <div class="tabbar">
-          ${[['devolucao','Por devolução'],['item','Por item'],['sku','Por produto/SKU'],['localizacao','Por localização'],['destino','Por destino final']].map(([k,l])=>`<button class="${view===k?'active':''}" onclick="state.stockView='${k}'; save(); render()">${l}</button>`).join('')}
+function renderQrModal(ctx){
+  closeModal();
+  const html = `
+    <div class="modal-backdrop" id="modal">
+      <div class="modal" style="max-width:860px">
+        <div class="modal-header">
+          <div><h2>Enviar evidência via QR Code</h2><p>Escaneie com o celular para anexar a foto diretamente ao contexto correto.</p></div>
+          <button class="btn ghost" onclick="closeQrModal()">Fechar</button>
         </div>
-        <div class="form-grid two">
-          <div class="field"><label>Busca</label><input value="${esc(state.filters.returnSearch||'')}" oninput="state.filters.returnSearch=this.value; render()" placeholder="SKU, produto, pedido, NF-e, cliente"></div>
-          <div class="field"><label>Filtro rápido</label><select onchange="state.filters.stockQuick=this.value; render()"><option ${!state.filters.stockQuick?'selected':''} value="">Todos</option><option ${state.filters.stockQuick==='blocked'?'selected':''} value="blocked">Apenas bloqueados</option><option ${state.filters.stockQuick==='diff'?'selected':''} value="diff">Com divergência física</option><option ${state.filters.stockQuick==='positive'?'selected':''} value="positive">Qtd física maior que NF-e</option><option ${state.filters.stockQuick==='quarantine'?'selected':''} value="quarantine">Em quarentena</option></select></div>
+        <div class="qr-card">
+          <div>
+            <div class="qr-box" id="qrBox"><span class="hint">Gerando QR Code...</span></div>
+            <div class="row-actions" style="margin-top:12px">
+              <button class="btn" onclick="copyText('${esc(ctx.uploadUrl)}')">Copiar link</button>
+              <a class="btn primary" href="${esc(ctx.uploadUrl)}" target="_blank" rel="noopener">Abrir upload</a>
+            </div>
+          </div>
+          <div>
+            <h3>Contexto</h3>
+            <p><strong>${esc(ctx.ret?.code || 'Evidência')}</strong></p>
+            <p class="hint">Pedido: ${esc(ctx.ret?.orderNumber || '-')}<br>SKU: ${esc(ctx.item?.sku || '-')}<br>Produto: ${esc(ctx.item?.description || '-')}<br>Categoria: ${esc(ctx.category)}</p>
+            <p class="hint">Validade: 15 minutos</p>
+            <p id="qrStatus"><span class="sync-pill">Aguardando envio pelo celular...</span></p>
+          </div>
         </div>
       </div>
-      <div class="card" style="margin-top:18px">${view==='sku'?renderStockSkuTable(skuAgg):view==='item'?renderStockItemTable(rows):view==='localizacao'?renderGroupedStock(rows,'location','Localização'):view==='destino'?renderGroupedStock(rows,'destination','Destino final'):renderGroupedStock(rows,'ret.code','Devolução')}</div>`;
-  };
-
-  function filterStockRows(rows){
-    const q=(state.filters.returnSearch||'').toLowerCase().trim();
-    let out=rows;
-    if(q) out=out.filter(r=>[r.sku,r.ean,r.product,r.ret.code,r.ret.orderNumber,r.ret.invoice?.number,r.ret.invoice?.accessKey,r.ret.customerName,r.destination,r.location].join(' ').toLowerCase().includes(q));
-    const f=state.filters.stockQuick;
-    if(f==='blocked') out=out.filter(r=>r.availability!=='Disponível para venda');
-    if(f==='diff') out=out.filter(r=>Number(r.item.quantity_difference||0)!==0);
-    if(f==='positive') out=out.filter(r=>Number(r.item.quantity_difference||0)>0);
-    if(f==='quarantine') out=out.filter(r=>r.destination==='Quarentena');
-    return out;
-  }
-
-  function renderStockSkuTable(list){
-    if(!list.length) return empty('Sem estoque devolvido para exibir. Finalize uma devolução ou ajuste os filtros.');
-    return `<h2>Estoque por Produto/SKU</h2><div class="table-wrap" style="margin-top:14px"><table class="wide-table"><thead><tr><th class="sticky-first">SKU</th><th>Produto</th><th>Total</th><th>Valor</th><th>Reabast.</th><th>Quarentena</th><th>Reparo</th><th>Reembal.</th><th>Descarte</th><th>Contest.</th><th>Transf.</th><th>Outlet</th><th>Aguard.</th><th>Disponível</th><th>Bloqueada</th><th>Última</th><th>Devoluções</th><th>Ações</th></tr></thead><tbody>${list.map(g=>`<tr><td class="sticky-first"><strong>${esc(g.sku)}</strong><br><span class="hint">EAN ${esc(g.ean||'-')}</span></td><td>${esc(g.product||'-')}</td><td><strong>${num(g.total)}</strong></td><td>${money(g.value)}</td><td>${num(g.reabastecimento)}</td><td>${num(g.quarentena)}</td><td>${num(g.reparo)}</td><td>${num(g.reembalagem)}</td><td>${num(g.descarte)}</td><td>${num(g.contestacao)}</td><td>${num(g.transferencia)}</td><td>${num(g.outlet)}</td><td>${num(g.aguardando)}</td><td>${num(g.available)}</td><td>${num(g.blocked)}</td><td>${brDate(g.lastReturnAt)}</td><td>${g.relatedReturnsCount}</td><td><button class="btn small" onclick="openSkuDetail('${esc(g.sku)}')">Detalhe</button></td></tr>`).join('')}</tbody></table></div>`;
-  }
-
-  function renderStockItemTable(rows){
-    if(!rows.length) return empty('Sem itens.');
-    return `<h2>Estoque por item</h2><div class="table-wrap"><table><thead><tr><th>Devolução</th><th>SKU</th><th>Produto</th><th>Qtd NF-e</th><th>Qtd física</th><th>Dif.</th><th>Destino</th><th>Localização</th><th>Disp.</th><th>Ação</th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${esc(r.ret.code)}</strong><br><span class="hint">${esc(r.ret.orderNumber||'-')}</span></td><td>${esc(r.sku)}</td><td>${esc(r.product)}</td><td>${num(r.item.invoice_quantity)}</td><td>${num(r.qty)}</td><td>${r.item.quantity_difference>0?'+':''}${num(r.item.quantity_difference)}</td><td>${destBadge(r.destination)}</td><td>${esc(r.location)}</td><td>${esc(r.availability)}</td><td><button class="btn small" onclick="openReturn('${r.ret.id}')">Abrir</button></td></tr>`).join('')}</tbody></table></div>`;
-  }
-
-  function renderGroupedStock(rows,key,label){
-    const grouped = {};
-    rows.forEach(r=>{ let k=key==='ret.code'?r.ret.code:r[key]; grouped[k||'Não informado']=(grouped[k||'Não informado']||0)+r.qty; });
-    return `<h2>${label}</h2>${Object.keys(grouped).length ? renderBars(grouped) : empty('Sem dados.')}`;
-  }
-
-  window.openSkuDetail = function(sku){
-    const rows = allStockRows().filter(r=>r.sku===sku);
-    const g = aggregateBySku(rows)[0]; if(!g) return;
-    const byDest = {}; const byLoc={}; const byMkt={}; const byReason={};
-    rows.forEach(r=>{byDest[r.destination]=(byDest[r.destination]||0)+r.qty;byLoc[r.location]=(byLoc[r.location]||0)+r.qty;byMkt[r.ret.marketplace||'-']=(byMkt[r.ret.marketplace||'-']||0)+r.qty;byReason[r.ret.returnReason||'-']=(byReason[r.ret.returnReason||'-']||0)+r.qty;});
-    const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card"><div class="split"><div><h2>${esc(g.sku)} · ${esc(g.product)}</h2><p>Total devolvido: <strong>${num(g.total)}</strong> · Valor: <strong>${money(g.value)}</strong> · Devoluções: <strong>${g.relatedReturnsCount}</strong></p></div><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><section class="grid cols-4" style="margin-top:14px">${metricCard('Reabastecimento',num(g.reabastecimento),'Unidades','✓')}${metricCard('Quarentena',num(g.quarentena),'Unidades','⚠')}${metricCard('Bloqueadas',num(g.blocked),'Unidades','⛔')}${metricCard('Dias médios parados',g.avgDays,'Média','◷')}</section><div class="grid cols-2" style="margin-top:14px"><div class="card"><h2>Por destino</h2>${renderBars(byDest)}</div><div class="card"><h2>Por localização</h2>${renderBars(byLoc)}</div></div><div class="card" style="margin-top:14px"><h2>Devoluções relacionadas</h2><div class="table-wrap"><table><thead><tr><th>Devolução</th><th>Pedido</th><th>NF-e</th><th>Marketplace</th><th>Cliente</th><th>Qtd NF-e</th><th>Qtd física</th><th>Dif.</th><th>Destino</th><th>Ação</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.ret.code)}</td><td>${esc(r.ret.orderNumber||'-')}</td><td>${esc(r.ret.invoice?.number||'-')}</td><td>${esc(r.ret.marketplace||'-')}</td><td>${esc(r.ret.customerName||'-')}</td><td>${num(r.item.invoice_quantity)}</td><td>${num(r.qty)}</td><td>${r.item.quantity_difference>0?'+':''}${num(r.item.quantity_difference)}</td><td>${destBadge(r.destination)}</td><td><button class="btn small" onclick="document.querySelector('.sku-modal').remove(); openReturn('${r.ret.id}')">Abrir</button></td></tr>`).join('')}</tbody></table></div></div></div>`; document.body.appendChild(modal);
-  };
-
-  window.exportSkuStockCsv = function(){
-    const list = aggregateBySku(filterStockRows(allStockRows()));
-    const rows = [['SKU','EAN','Produto','Total devolvido','Valor total','Reabastecimento','Quarentena','Reparo','Reembalagem','Descarte','Contestacao','Transferencia','Outlet','Aguardando decisao','Disponivel','Bloqueada','Ultima devolucao','Devolucoes relacionadas','Dias medios']];
-    list.forEach(g=>rows.push([g.sku,g.ean,g.product,g.total,g.value,g.reabastecimento,g.quarentena,g.reparo,g.reembalagem,g.descarte,g.contestacao,g.transferencia,g.outlet,g.aguardando,g.available,g.blocked,brDate(g.lastReturnAt),g.relatedReturnsCount,g.avgDays]));
-    download('estoque-por-sku.csv', rows.map(row=>row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
-  };
-
-  const oldDownloadReturnCsv = downloadReturnCsv;
-  window.downloadReturnCsv = function(retId){
-    const ret = getReturn(retId);
-    const rows = [['Codigo','Pedido','SKU NF-e','SKU fisico','EAN NF-e','EAN fisico','Descricao NF-e','Descricao fisica','Qtd NF-e','Qtd fisica','Diferenca','Status quantidade','Status conferencia','Condicao fisica','Embalagem','Destino','Justificativa','Evidencias','Revisao']];
-    ret.items.forEach(i => { normalizeQtyFields(i); rows.push([ret.code, ret.orderNumber, i.invoice_sku, i.physical_sku, i.invoice_ean, i.physical_ean, i.invoice_product_name, i.physical_product_name, i.invoice_quantity, i.physical_received_quantity, i.quantity_difference, i.quantity_status, i.conferenceStatus, i.physicalCondition, i.packageCondition, i.destination, i.destinationReason, (i.evidences || []).length, ret.revisionNumber||1]); });
-    download(`${ret.code}-itens.csv`, rows.map(row => row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
-  };
-
-})();
-
-
-(function(){
-  const mediaStyle = document.createElement('style');
-  mediaStyle.textContent = `
-    .media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
-    .media-card{border:1px solid var(--line);border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 10px 24px rgba(15,23,42,.04)}
-    .media-thumb{height:148px;background:linear-gradient(135deg,#eef2ff,#e0f2fe);display:grid;place-items:center;color:#1d4ed8;font-size:34px;font-weight:900;overflow:hidden}
-    .media-thumb img,.media-thumb video{width:100%;height:100%;object-fit:cover;display:block}
-    .media-body{padding:12px}.media-body strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.media-meta{font-size:12px;color:var(--muted);line-height:1.45;margin-top:5px}
-    .media-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .viewer-modal{position:fixed;inset:0;background:rgba(15,23,42,.76);z-index:120;display:grid;place-items:center;padding:22px}
-    .viewer-card{background:#fff;border-radius:24px;box-shadow:var(--shadow);width:min(1180px,100%);max-height:94vh;overflow:hidden;display:grid;grid-template-columns:1fr 330px}
-    .viewer-stage{min-height:620px;background:#0f172a;display:grid;place-items:center;overflow:hidden;position:relative}.viewer-stage img{max-width:92%;max-height:82vh;object-fit:contain;transition:.18s ease}.viewer-stage video{max-width:92%;max-height:82vh}.viewer-stage iframe{width:92%;height:78vh;background:#fff;border:0;border-radius:12px}.viewer-side{padding:20px;overflow:auto}.viewer-side h2{margin:0 0 8px}.viewer-nav{position:absolute;inset:auto 20px 20px 20px;display:flex;justify-content:space-between}.viewer-tools{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.drop-evidence{border:2px dashed #bfdbfe;background:#eff6ff;border-radius:18px;padding:18px;text-align:center}.media-badge{font-size:11px;font-weight:900;text-transform:uppercase;border-radius:999px;padding:5px 8px;background:#eef2ff;color:#1d4ed8;display:inline-flex}.deleted-media{opacity:.45;filter:grayscale(1)}
-    @media(max-width:960px){.viewer-card{grid-template-columns:1fr}.viewer-stage{min-height:420px}.viewer-side{max-height:40vh}}
-  `;
-  document.head.appendChild(mediaStyle);
-
-  state.mediaFilters = state.mediaFilters || {q:'', type:'Todos', status:'Ativas', sort:'recent'};
-
-  const previousSaveMedia = save;
-  window.save = function(){
-    localStorage.setItem(APP_KEY, JSON.stringify({
-      users: state.users, session: state.session, route: state.route, currentReturnId: state.currentReturnId,
-      returns: state.returns, audit: state.audit, rules: state.rules, filters: state.filters,
-      stockView: state.stockView, correctionDrafts: state.correctionDrafts, mediaFilters: state.mediaFilters
-    }));
-  };
-
-  const oldSidebarMedia = renderSidebar;
-  window.renderSidebar = function(){
-    const items = [
-      ['dashboard','Painel','▦','reports'],
-      ['nova','Nova devolução','＋','create_return'],
-      ['devolucoes','Devoluções','▤','reports'],
-      ['estoque','Estoque Devolvido','▥','stock'],
-      ['evidencias','Central de Evidências','▧','reports'],
-      ['relatorios','Relatórios','◷','reports'],
-      ['auditoria','Auditoria','⎋','audit'],
-      ['configuracoes','Configurações','⚙','settings']
-    ].filter(i => hasPermission(i[3]));
-    return `<aside class="sidebar"><div class="logo"><div class="logo-mark">NF</div><span>ReturnFlow</span></div><nav class="nav">${items.map(([route,label,icon]) => `<button class="${state.route===route?'active':''}" onclick="nav('${route}')"><span>${icon}</span>${label}</button>`).join('')}</nav><div class="side-footer"><div class="user-mini"><div class="avatar">${esc(state.session.name.slice(0,1))}</div><div><strong>${esc(state.session.name)}</strong><br><span class="hint">${esc(state.session.role)}</span></div></div><button class="btn ghost small" style="width:100%;margin-top:14px" onclick="logout()">Sair</button></div></aside>`;
-  };
-
-  const oldTopbarMedia = renderTopbar;
-  window.renderTopbar = function(){
-    const titles = {dashboard:'Dashboard operacional', nova:'Nova devolução', devolucoes:'Devoluções', estoque:'Estoque Devolvido', evidencias:'Central de Evidências', relatorios:'Relatórios', auditoria:'Trilha de auditoria', configuracoes:'Configurações'};
-    const subtitles = {dashboard:'Acompanhe volume, divergências, perdas e status dos processos.', nova:'Inicie pela chave da NF-e ou por upload do XML.', devolucoes:'Consulte, abra e finalize processos de devolução.', estoque:'Visualize o estoque devolvido por SKU, item, localização ou destino.', evidencias:'Galeria central de fotos, vídeos, XMLs, PDFs e documentos anexados.', relatorios:'Exporte dados para auditoria, financeiro e marketplaces.', auditoria:'Histórico imutável de ações relevantes.', configuracoes:'Regras de negócio, permissões e parâmetros do sistema.'};
-    return `<header class="topbar no-print"><div><h1>${titles[state.route] || 'Aplicativo'}</h1><p>${subtitles[state.route] || ''}</p></div><div class="searchbar"><input placeholder="Buscar pedido, SKU, cliente, NF-e..." value="${esc(state.filters.returnSearch || '')}" oninput="state.filters.returnSearch=this.value; save(); if(['estoque','evidencias'].includes(state.route)) render()"><button class="btn primary" onclick="nav('nova')">Nova devolução</button></div></header>`;
-  };
-
-  const oldRouteMedia = renderRoute;
-  window.renderRoute = function(){
-    if(state.route === 'evidencias') return renderEvidenceCenter();
-    return oldRouteMedia();
-  };
-
-  window.handleEvidenceUpload = function(input, retId, itemId){
-    const ret = getReturn(retId);
-    const item = ret?.items.find(i => i.id === itemId);
-    if(!item) return;
-    const files = Array.from(input.files || []);
-    if(!files.length) return;
-    const accepted = ['image/jpeg','image/jpg','image/png','image/webp','video/mp4','video/quicktime','video/webm','application/pdf','text/xml','application/xml','text/csv','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
-    let pending = files.length;
-    files.forEach(file => {
-      if(!accepted.includes(file.type) && !/\.(xml|csv|xlsx|pdf|mov)$/i.test(file.name)){
-        alert(`Arquivo não permitido: ${file.name}`);
-        pending--; if(pending===0) render(); return;
-      }
-      const ev = {id: uid('ev'), name: file.name, originalName:file.name, type: file.type || mimeFromName(file.name), size:file.size, uploadedBy:state.session.name, uploadedAt:nowIso(), returnId:ret.id, returnCode:ret.code, itemId:item.id, sku:item.physical_sku || item.sku, ean:item.physical_ean || item.ean, product:item.physical_product_name || item.description, invoiceNumber:ret.invoice?.number || '', invoiceKey:ret.invoice?.accessKey || '', orderNumber:ret.orderNumber || '', evidenceType: inferEvidenceType(file.name, file.type), notes:'', status:'Ativa', deletedAt:'', deletedBy:'', deletionReason:'', dataUrl:'', preview:''};
-      const reader = new FileReader();
-      reader.onload = function(){
-        ev.dataUrl = String(reader.result || '');
-        if((file.type || '').startsWith('image/')) ev.preview = ev.dataUrl;
-        item.evidences = item.evidences || [];
-        item.evidences.push(ev);
-        addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
-        addAudit('Evidência anexada', 'evidence', ev.id, `${ret.code} / ${item.sku} / ${file.name}`);
-        pending--;
-        if(pending === 0){ save(); render(); }
-      };
-      reader.onerror = function(){ pending--; if(pending===0) render(); };
-      reader.readAsDataURL(file);
-    });
-    input.value = '';
-  };
-
-  window.renderEvidence = function(list){
-    const active = (list || []).filter(ev => ev.status !== 'Excluída');
-    if(!active.length) return '<p class="hint">Nenhuma evidência anexada para este item.</p>';
-    return `<div class="evidence-grid">${active.map((ev,idx) => `<div class="evidence"><strong>${esc(ev.name)}</strong><br><span class="hint">${Math.round((ev.size || 0)/1024)} KB · ${esc(ev.uploadedBy || '-')}</span>${ev.preview ? `<img src="${ev.preview}" alt="Evidência" onclick="openEvidenceViewer('${ev.id}')" style="cursor:zoom-in">` : `<div class="media-thumb" style="height:82px;border-radius:10px;margin-top:8px;font-size:22px">${fileIcon(ev)}</div>`}<div class="row-actions" style="margin-top:8px"><button class="btn small" onclick="openEvidenceViewer('${ev.id}')">Abrir</button>${ev.dataUrl ? `<button class="btn small" onclick="downloadEvidence('${ev.id}')">Baixar</button>` : ''}</div></div>`).join('')}</div>`;
-  };
-
-  function allEvidence(){
-    const rows = [];
-    state.returns.forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => rows.push({...ev, ret, item}))));
-    return rows;
-  }
-  window.allEvidence = allEvidence;
-
-  function renderEvidenceCenter(){
-    state.mediaFilters = state.mediaFilters || {q:'', type:'Todos', status:'Ativas', sort:'recent'};
-    let list = allEvidence();
-    const q = (state.mediaFilters.q || state.filters.returnSearch || '').toLowerCase().trim();
-    if(q) list = list.filter(ev => [ev.name,ev.evidenceType,ev.sku,ev.product,ev.returnCode,ev.orderNumber,ev.invoiceNumber,ev.uploadedBy,ev.notes].join(' ').toLowerCase().includes(q));
-    if(state.mediaFilters.type !== 'Todos') list = list.filter(ev => evidenceGroup(ev) === state.mediaFilters.type || ev.evidenceType === state.mediaFilters.type);
-    if(state.mediaFilters.status === 'Ativas') list = list.filter(ev => ev.status !== 'Excluída');
-    if(state.mediaFilters.status === 'Excluídas') list = list.filter(ev => ev.status === 'Excluída');
-    if(state.mediaFilters.sort === 'old') list.sort((a,b)=>new Date(a.uploadedAt)-new Date(b.uploadedAt)); else list.sort((a,b)=>new Date(b.uploadedAt)-new Date(a.uploadedAt));
-    const totalSize = list.reduce((s,ev)=>s+Number(ev.size||0),0);
-    const images = list.filter(ev=>evidenceGroup(ev)==='Imagem').length;
-    const videos = list.filter(ev=>evidenceGroup(ev)==='Vídeo').length;
-    const docs = list.filter(ev=>evidenceGroup(ev)==='Documento').length;
-    return `<section class="grid cols-4">${metricCard('Evidências', list.length, 'Arquivos filtrados', '▧')}${metricCard('Imagens', images, 'Fotos e previews', 'IMG')}${metricCard('Vídeos', videos, 'Arquivos de vídeo', 'VID')}${metricCard('Tamanho', formatBytes(totalSize), 'Volume exibido', 'MB')}</section><div class="card" style="margin-top:18px"><div class="split"><div><h2>Central de Evidências</h2><p>Visualize fotos, vídeos, PDFs, XMLs e documentos vinculados a devoluções, itens, movimentações e destinos finais.</p></div><div class="row-actions"><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button><button class="btn" onclick="window.print()">Imprimir / PDF</button></div></div><div class="form-grid"><div class="field"><label>Busca</label><input value="${esc(state.mediaFilters.q || '')}" oninput="state.mediaFilters.q=this.value; save(); render()" placeholder="Arquivo, SKU, pedido, NF-e, produto"></div><div class="field"><label>Tipo</label><select onchange="state.mediaFilters.type=this.value; save(); render()"><option ${state.mediaFilters.type==='Todos'?'selected':''}>Todos</option><option ${state.mediaFilters.type==='Imagem'?'selected':''}>Imagem</option><option ${state.mediaFilters.type==='Vídeo'?'selected':''}>Vídeo</option><option ${state.mediaFilters.type==='Documento'?'selected':''}>Documento</option><option ${state.mediaFilters.type==='Produto avariado'?'selected':''}>Produto avariado</option><option ${state.mediaFilters.type==='Embalagem'?'selected':''}>Embalagem</option><option ${state.mediaFilters.type==='XML'?'selected':''}>XML</option><option ${state.mediaFilters.type==='Contestação'?'selected':''}>Contestação</option></select></div><div class="field"><label>Status</label><select onchange="state.mediaFilters.status=this.value; save(); render()"><option ${state.mediaFilters.status==='Ativas'?'selected':''}>Ativas</option><option ${state.mediaFilters.status==='Excluídas'?'selected':''}>Excluídas</option><option ${state.mediaFilters.status==='Todas'?'selected':''}>Todas</option></select></div><div class="field"><label>Ordenação</label><select onchange="state.mediaFilters.sort=this.value; save(); render()"><option value="recent" ${state.mediaFilters.sort==='recent'?'selected':''}>Mais recentes</option><option value="old" ${state.mediaFilters.sort==='old'?'selected':''}>Mais antigas</option></select></div></div></div><div class="card" style="margin-top:18px">${list.length ? `<div class="media-grid">${list.map((ev,idx)=>mediaCard(ev, idx)).join('')}</div>` : empty('Nenhuma evidência encontrada. Anexe arquivos na etapa de inspeção da devolução.')}</div>`;
-  }
-  window.renderEvidenceCenter = renderEvidenceCenter;
-
-  function mediaCard(ev){
-    const deleted = ev.status === 'Excluída';
-    return `<div class="media-card ${deleted?'deleted-media':''}"><div class="media-thumb" onclick="openEvidenceViewer('${ev.id}')" style="cursor:pointer">${thumbHtml(ev)}</div><div class="media-body"><span class="media-badge">${esc(ev.evidenceType || evidenceGroup(ev))}</span><strong title="${esc(ev.name)}">${esc(ev.name)}</strong><div class="media-meta">${esc(ev.returnCode || ev.ret?.code || '-')} · ${esc(ev.sku || ev.item?.sku || '-')}<br>${esc(ev.product || ev.item?.description || '-')}<br>${brDate(ev.uploadedAt)} · ${esc(ev.uploadedBy || '-')}</div><div class="media-actions"><button class="btn small" onclick="openEvidenceViewer('${ev.id}')">Abrir</button>${ev.dataUrl ? `<button class="btn small" onclick="downloadEvidence('${ev.id}')">Baixar</button>` : ''}${!deleted ? `<button class="btn danger small" onclick="softDeleteEvidence('${ev.id}')">Excluir</button>` : ''}</div></div></div>`;
-  }
-
-  function thumbHtml(ev){
-    const group = evidenceGroup(ev);
-    if(group === 'Imagem' && (ev.preview || ev.dataUrl)) return `<img src="${ev.preview || ev.dataUrl}" alt="${esc(ev.name)}">`;
-    if(group === 'Vídeo' && ev.dataUrl) return `<video src="${ev.dataUrl}" muted></video>`;
-    return `<div>${fileIcon(ev)}</div>`;
-  }
-
-  window.openEvidenceViewer = function(evId){
-    const list = allEvidence().filter(ev => ev.status !== 'Excluída');
-    let idx = Math.max(0, list.findIndex(ev => ev.id === evId));
-    if(!list.length || idx < 0) return;
-    let zoom = 1, rotate = 0;
-    const modal = document.createElement('div'); modal.className = 'viewer-modal';
-    function draw(){
-      const ev = list[idx];
-      modal.innerHTML = `<div class="viewer-card"><div class="viewer-stage">${viewerContent(ev, zoom, rotate)}<div class="viewer-nav"><button class="btn ghost" onclick="window.__evPrev()">← Anterior</button><button class="btn ghost" onclick="window.__evNext()">Próxima →</button></div></div><aside class="viewer-side"><div class="split"><h2>Evidência</h2><button class="btn ghost small" onclick="document.querySelector('.viewer-modal').remove()">Fechar</button></div><p><strong>${esc(ev.name)}</strong></p><div class="viewer-tools"><button class="btn small" onclick="window.__evZoomIn()">Zoom +</button><button class="btn small" onclick="window.__evZoomOut()">Zoom -</button><button class="btn small" onclick="window.__evRotate()">Girar</button>${ev.dataUrl ? `<button class="btn small" onclick="downloadEvidence('${ev.id}')">Baixar</button>` : ''}</div><div class="media-meta"><strong>Tipo:</strong> ${esc(ev.evidenceType || evidenceGroup(ev))}<br><strong>Upload:</strong> ${brDate(ev.uploadedAt)}<br><strong>Usuário:</strong> ${esc(ev.uploadedBy || '-')}<br><strong>Devolução:</strong> ${esc(ev.returnCode || ev.ret?.code || '-')}<br><strong>Pedido:</strong> ${esc(ev.orderNumber || ev.ret?.orderNumber || '-')}<br><strong>NF-e:</strong> ${esc(ev.invoiceNumber || ev.ret?.invoice?.number || '-')}<br><strong>SKU:</strong> ${esc(ev.sku || ev.item?.sku || '-')}<br><strong>Produto:</strong> ${esc(ev.product || ev.item?.description || '-')}<br><strong>Tamanho:</strong> ${formatBytes(ev.size || 0)}</div><label style="margin-top:14px">Observação</label><textarea onchange="updateEvidenceNote('${ev.id}', this.value)">${esc(ev.notes || '')}</textarea></aside></div>`;
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  const box = document.getElementById('qrBox');
+  const fallback = `<img alt="QR Code" src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(ctx.uploadUrl)}">`;
+  try{
+    if(window.QRCode && QRCode.toCanvas){
+      box.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      box.appendChild(canvas);
+      QRCode.toCanvas(canvas, ctx.uploadUrl, {width:260, margin:1}, err => { if(err) box.innerHTML = fallback; });
+    }else{
+      box.innerHTML = fallback;
     }
-    window.__evPrev = function(){ idx = (idx - 1 + list.length) % list.length; zoom = 1; rotate = 0; draw(); };
-    window.__evNext = function(){ idx = (idx + 1) % list.length; zoom = 1; rotate = 0; draw(); };
-    window.__evZoomIn = function(){ zoom = Math.min(3, zoom + .25); draw(); };
-    window.__evZoomOut = function(){ zoom = Math.max(.5, zoom - .25); draw(); };
-    window.__evRotate = function(){ rotate = (rotate + 90) % 360; draw(); };
-    draw(); document.body.appendChild(modal);
-  };
+  }catch(e){ box.innerHTML = fallback; }
+}
 
-  function viewerContent(ev, zoom, rotate){
-    const group = evidenceGroup(ev);
-    const src = ev.dataUrl || ev.preview || '';
-    if(group === 'Imagem' && src) return `<img src="${src}" style="transform:scale(${zoom}) rotate(${rotate}deg)" alt="${esc(ev.name)}">`;
-    if(group === 'Vídeo' && src) return `<video src="${src}" controls></video>`;
-    if((ev.type || '').includes('pdf') && src) return `<iframe src="${src}"></iframe>`;
-    if(src && ((ev.type || '').includes('xml') || /\.xml$/i.test(ev.name))) return `<iframe src="${src}"></iframe>`;
-    return `<div style="color:#fff;text-align:center"><div style="font-size:64px">${fileIcon(ev)}</div><p>${esc(ev.name)}</p><p class="hint" style="color:#cbd5e1">Pré-visualização indisponível. Use Baixar.</p></div>`;
-  }
-
-  window.downloadEvidence = function(evId){
-    const ev = allEvidence().find(e => e.id === evId);
-    if(!ev || !ev.dataUrl) return alert('Arquivo sem conteúdo salvo para download. Evidências antigas podem ter apenas miniatura.');
-    const a = document.createElement('a'); a.href = ev.dataUrl; a.download = ev.name || 'evidencia'; document.body.appendChild(a); a.click(); a.remove();
-    addAudit('Download de evidência', 'evidence', ev.id, ev.name || ''); save();
-  };
-
-  window.updateEvidenceNote = function(evId, value){
-    const found = findEvidenceRef(evId); if(!found) return;
-    found.ev.notes = value; addAudit('Observação de evidência atualizada', 'evidence', evId, found.ev.name || ''); save();
-  };
-
-  window.softDeleteEvidence = function(evId){
-    const found = findEvidenceRef(evId); if(!found) return;
-    if(!['Administrador','Supervisor'].includes(state.session.role)){ alert('Somente Administrador ou Supervisor pode excluir evidência.'); return; }
-    const reason = prompt('Informe o motivo da exclusão lógica:'); if(!reason || !reason.trim()) return;
-    found.ev.status = 'Excluída'; found.ev.deletedAt = nowIso(); found.ev.deletedBy = state.session.name; found.ev.deletionReason = reason.trim();
-    addReturnAudit(found.ret, 'Evidência excluída logicamente', `${found.ev.name}: ${reason}`); addAudit('Evidência excluída logicamente', 'evidence', evId, reason.trim()); save(); render();
-  };
-
-  function findEvidenceRef(evId){
-    for(const ret of state.returns){ for(const item of (ret.items || [])){ const ev = (item.evidences || []).find(e => e.id === evId); if(ev) return {ret,item,ev}; } }
-    return null;
-  }
-
-  window.exportEvidenceCsv = function(){
-    const rows = [['ID','Arquivo','Tipo','Status','Devolucao','Pedido','NF-e','SKU','Produto','Usuario','Data','Tamanho','Observacao']];
-    allEvidence().forEach(ev => rows.push([ev.id, ev.name, ev.evidenceType || evidenceGroup(ev), ev.status || 'Ativa', ev.returnCode || ev.ret?.code || '', ev.orderNumber || ev.ret?.orderNumber || '', ev.invoiceNumber || ev.ret?.invoice?.number || '', ev.sku || ev.item?.sku || '', ev.product || ev.item?.description || '', ev.uploadedBy || '', brDate(ev.uploadedAt), ev.size || 0, ev.notes || '']));
-    download('central-evidencias.csv', rows.map(row => row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
-  };
-
-  const previousReturnedStock = renderReturnedStock;
-  window.renderReturnedStock = function(){
-    const view = state.stockView || 'sku';
-    const rows = filterStockEvidenceRows(allStockRows());
-    const skuAgg = aggregateBySku(rows);
-    const totalUnits = rows.reduce((s,r)=>s+r.qty,0);
-    const blocked = rows.filter(r=>r.availability!=='Disponível para venda').reduce((s,r)=>s+r.qty,0);
-    return `<section class="grid cols-4">${metricCard('SKUs com devolução', skuAgg.length, 'Produtos consolidados', 'SKU')}${metricCard('Unidades devolvidas', num(totalUnits), 'Quantidade física recebida', '▥')}${metricCard('Unidades bloqueadas', num(blocked), 'Quarentena, contestação, descarte ou análise', '⚠')}${metricCard('Evidências', allEvidence().filter(e=>e.status!=='Excluída').length, 'Arquivos anexados', '▧')}</section><div class="card" style="margin-top:18px"><div class="split"><div><h2>Estoque Devolvido</h2><p>Alterne entre visões operacionais. A visão por SKU consolida as quantidades por situação.</p></div><div class="row-actions"><button class="btn" onclick="exportSkuStockCsv()">Exportar SKU CSV</button><button class="btn" onclick="nav('evidencias')">Central de Evidências</button><button class="btn" onclick="window.print()">Imprimir / PDF</button></div></div><div class="tabbar">${[['devolucao','Por devolução'],['item','Por item'],['sku','Por produto/SKU'],['localizacao','Por localização'],['destino','Por destino final']].map(([k,l])=>`<button class="${view===k?'active':''}" onclick="state.stockView='${k}'; save(); render()">${l}</button>`).join('')}</div><div class="form-grid two"><div class="field"><label>Busca</label><input value="${esc(state.filters.returnSearch||'')}" oninput="state.filters.returnSearch=this.value; render()" placeholder="SKU, produto, pedido, NF-e, cliente"></div><div class="field"><label>Filtro rápido</label><select onchange="state.filters.stockQuick=this.value; render()"><option ${!state.filters.stockQuick?'selected':''} value="">Todos</option><option ${state.filters.stockQuick==='blocked'?'selected':''} value="blocked">Apenas bloqueados</option><option ${state.filters.stockQuick==='diff'?'selected':''} value="diff">Com divergência física</option><option ${state.filters.stockQuick==='positive'?'selected':''} value="positive">Qtd física maior que NF-e</option><option ${state.filters.stockQuick==='quarantine'?'selected':''} value="quarantine">Em quarentena</option></select></div></div></div><div class="card" style="margin-top:18px">${view==='sku'?stockSkuEvidenceTable(skuAgg):view==='item'?stockItemEvidenceTable(rows):view==='localizacao'?groupEvidenceStock(rows,'location','Localização'):view==='destino'?groupEvidenceStock(rows,'destination','Destino final'):groupEvidenceStock(rows,'returnCode','Devolução')}</div>`;
-  };
-
-  function filterStockEvidenceRows(rows){
-    const q=(state.filters.returnSearch||'').toLowerCase().trim(); let out=rows.map(r=>({...r, returnCode:r.ret.code, evidenceCount:(r.item.evidences||[]).filter(e=>e.status!=='Excluída').length}));
-    if(q) out=out.filter(r=>[r.sku,r.ean,r.product,r.ret.code,r.ret.orderNumber,r.ret.invoice?.number,r.ret.invoice?.accessKey,r.ret.customerName,r.destination,r.location].join(' ').toLowerCase().includes(q));
-    const f=state.filters.stockQuick;
-    if(f==='blocked') out=out.filter(r=>r.availability!=='Disponível para venda');
-    if(f==='diff') out=out.filter(r=>Number(r.item.quantity_difference||0)!==0);
-    if(f==='positive') out=out.filter(r=>Number(r.item.quantity_difference||0)>0);
-    if(f==='quarantine') out=out.filter(r=>r.destination==='Quarentena');
-    return out;
-  }
-  function stockSkuEvidenceTable(list){
-    if(!list.length) return empty('Sem estoque devolvido para exibir.');
-    return `<h2>Estoque por Produto/SKU</h2><div class="table-wrap" style="margin-top:14px"><table class="wide-table"><thead><tr><th class="sticky-first">SKU</th><th>Produto</th><th>Total</th><th>Valor</th><th>Reabast.</th><th>Quarentena</th><th>Reparo</th><th>Reembal.</th><th>Descarte</th><th>Contest.</th><th>Transf.</th><th>Outlet</th><th>Aguard.</th><th>Disponível</th><th>Bloqueada</th><th>Evidências</th><th>Última</th><th>Ações</th></tr></thead><tbody>${list.map(g=>{const evs=(g.rows||[]).reduce((s,r)=>s+((r.item.evidences||[]).filter(e=>e.status!=='Excluída').length),0); return `<tr><td class="sticky-first"><strong>${esc(g.sku)}</strong><br><span class="hint">EAN ${esc(g.ean||'-')}</span></td><td>${esc(g.product||'-')}</td><td><strong>${num(g.total)}</strong></td><td>${money(g.value)}</td><td>${num(g.reabastecimento)}</td><td>${num(g.quarentena)}</td><td>${num(g.reparo)}</td><td>${num(g.reembalagem)}</td><td>${num(g.descarte)}</td><td>${num(g.contestacao)}</td><td>${num(g.transferencia)}</td><td>${num(g.outlet)}</td><td>${num(g.aguardando)}</td><td>${num(g.available)}</td><td>${num(g.blocked)}</td><td><button class="btn small" onclick="openSkuEvidenceGallery('${esc(g.sku)}')">▧ ${evs}</button></td><td>${brDate(g.lastReturnAt)}</td><td><button class="btn small" onclick="openSkuDetail('${esc(g.sku)}')">Detalhe</button></td></tr>`}).join('')}</tbody></table></div>`;
-  }
-  function stockItemEvidenceTable(rows){
-    if(!rows.length) return empty('Sem itens.');
-    return `<h2>Estoque por item</h2><div class="table-wrap"><table><thead><tr><th>Devolução</th><th>SKU</th><th>Produto</th><th>Qtd NF-e</th><th>Qtd física</th><th>Dif.</th><th>Destino</th><th>Localização</th><th>Evidências</th><th>Ação</th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${esc(r.ret.code)}</strong><br><span class="hint">${esc(r.ret.orderNumber||'-')}</span></td><td>${esc(r.sku)}</td><td>${esc(r.product)}</td><td>${num(r.item.invoice_quantity)}</td><td>${num(r.qty)}</td><td>${r.item.quantity_difference>0?'+':''}${num(r.item.quantity_difference)}</td><td>${destBadge(r.destination)}</td><td>${esc(r.location)}</td><td><button class="btn small" onclick="openItemEvidenceGallery('${r.item.id}')">▧ ${r.evidenceCount}</button></td><td><button class="btn small" onclick="openReturn('${r.ret.id}')">Abrir</button></td></tr>`).join('')}</tbody></table></div>`;
-  }
-  function groupEvidenceStock(rows,key,label){ const grouped={}; rows.forEach(r=>{ const k=key==='returnCode'?r.ret.code:r[key]; grouped[k||'Não informado']=(grouped[k||'Não informado']||0)+r.qty; }); return `<h2>${label}</h2>${Object.keys(grouped).length ? renderBars(grouped) : empty('Sem dados.')}`; }
-
-  window.openItemEvidenceGallery = function(itemId){ const ev = allEvidence().filter(e => e.itemId===itemId || e.item?.id===itemId); if(!ev.length){ alert('Nenhuma evidência para este item.'); return; } openEvidenceViewer(ev[0].id); };
-  window.openSkuEvidenceGallery = function(sku){ const ev = allEvidence().filter(e => (e.sku || e.item?.sku) === sku && e.status !== 'Excluída'); if(!ev.length){ alert('Nenhuma evidência para este SKU.'); return; } openEvidenceViewer(ev[0].id); };
-
-  function evidenceGroup(ev){ const t=(ev.type||'').toLowerCase(); const n=(ev.name||'').toLowerCase(); if(t.startsWith('image/') || /\.(jpg|jpeg|png|webp)$/i.test(n)) return 'Imagem'; if(t.startsWith('video/') || /\.(mp4|mov|webm)$/i.test(n)) return 'Vídeo'; return 'Documento'; }
-  function inferEvidenceType(name,type){ const n=(name||'').toLowerCase(); if(n.includes('embal')) return 'Embalagem'; if(n.includes('avaria')||n.includes('dano')||n.includes('queb')) return 'Produto avariado'; if(n.endsWith('.xml')) return 'XML'; if(n.includes('contest')) return 'Contestação'; if(n.includes('etiqueta')) return 'Etiqueta de transporte'; return evidenceGroup({name,type}); }
-  function mimeFromName(name){ const n=(name||'').toLowerCase(); if(n.endsWith('.xml')) return 'application/xml'; if(n.endsWith('.csv')) return 'text/csv'; if(n.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'; if(n.endsWith('.pdf')) return 'application/pdf'; return 'arquivo'; }
-  function fileIcon(ev){ const g=evidenceGroup(ev); if(g==='Imagem') return 'IMG'; if(g==='Vídeo') return 'VID'; if((ev.name||'').toLowerCase().endsWith('.xml')) return 'XML'; if((ev.name||'').toLowerCase().endsWith('.pdf')) return 'PDF'; if((ev.name||'').toLowerCase().endsWith('.csv')) return 'CSV'; if((ev.name||'').toLowerCase().endsWith('.xlsx')) return 'XLS'; return 'DOC'; }
-  function formatBytes(bytes){ const b=Number(bytes||0); if(b<1024) return `${b} B`; if(b<1048576) return `${(b/1024).toFixed(1)} KB`; return `${(b/1048576).toFixed(1)} MB`; }
-
-
-  /************************************************************
-   * Módulo Transferências - armazéns, baixa de saldo e evidências
-   ************************************************************/
-  const DEFAULT_WAREHOUSES = [
-    {id:'wh-cd-principal', name:'CD Principal Decolab', type:'CD', document:'', responsible:'Equipe Estoque', phone:'', email:'', zip_code:'', address:'Rua / CD Principal', number:'', complement:'', district:'', city:'São Paulo', state:'SP', full_address:'Rua / CD Principal - São Paulo/SP', notes:'Destino padrão interno', is_active:true, created_at:nowIso(), updated_at:nowIso()},
-    {id:'wh-descarte', name:'Área de Descarte', type:'Área de descarte', document:'', responsible:'Supervisor', phone:'', email:'', zip_code:'', address:'CD Principal - Área de baixa', number:'', complement:'', district:'', city:'São Paulo', state:'SP', full_address:'CD Principal - Área de baixa - São Paulo/SP', notes:'Destino para descarte com aprovação', is_active:true, created_at:nowIso(), updated_at:nowIso()},
-    {id:'wh-outlet', name:'Estoque Outlet / Avarias', type:'Outlet', document:'', responsible:'Comercial', phone:'', email:'', zip_code:'', address:'CD Principal - Rua Outlet', number:'', complement:'', district:'', city:'São Paulo', state:'SP', full_address:'CD Principal - Rua Outlet - São Paulo/SP', notes:'Venda com condição especial', is_active:true, created_at:nowIso(), updated_at:nowIso()}
-  ];
-  const TRANSFER_TYPES = ['Transferência para outro armazém','Transferência para depósito','Transferência para CD','Transferência para outlet','Transferência para fornecedor','Transferência para reparo','Transferência para reembalagem','Transferência para quarentena externa','Transferência para descarte','Transferência para doação','Transferência para perda operacional'];
-  const TRANSFER_STATUS = ['Rascunho','Pendente de envio','Enviada','Em trânsito','Recebida','Parcialmente recebida','Cancelada','Recusada','Finalizada'];
-
-  function ensureTransferState(){
-    state.transfers = state.transfers || [];
-    state.transferItems = state.transferItems || [];
-    state.warehouses = state.warehouses && state.warehouses.length ? state.warehouses : structuredClone(DEFAULT_WAREHOUSES);
-    state.filters = state.filters || {};
-    state.filters.transferSearch = state.filters.transferSearch || '';
-    state.transferTab = state.transferTab || 'transferencias';
-  }
-  ensureTransferState();
-
-  const previousSaveTransfers = save;
-  window.save = function(){
-    const old = {transfers:state.transfers||[], transferItems:state.transferItems||[], warehouses:state.warehouses||[], transferTab:state.transferTab||'transferencias', mediaFilters:state.mediaFilters||null, stockView:state.stockView||null};
-    previousSaveTransfers();
-    try{
-      const raw = JSON.parse(localStorage.getItem(APP_KEY) || '{}');
-      Object.assign(raw, old);
-      localStorage.setItem(APP_KEY, JSON.stringify(raw));
-    }catch(e){}
-  };
-
-  const oldSidebarTransfers = renderSidebar;
-  window.renderSidebar = function(){
-    const items = [
-      ['dashboard','Painel','▦','reports'],
-      ['nova','Nova devolução','＋','create_return'],
-      ['devolucoes','Devoluções','▤','reports'],
-      ['estoque','Estoque Devolvido','▥','stock'],
-      ['transferencias','Transferências','⇄','stock'],
-      ['evidencias','Central de Evidências','▧','reports'],
-      ['relatorios','Relatórios','◷','reports'],
-      ['auditoria','Auditoria','⎋','audit'],
-      ['configuracoes','Configurações','⚙','settings']
-    ].filter(i => hasPermission(i[3]));
-    return `<aside class="sidebar"><div class="logo"><div class="logo-mark">NF</div><span>ReturnFlow</span></div><nav class="nav">${items.map(([route,label,icon]) => `<button class="${state.route===route?'active':''}" onclick="nav('${route}')"><span>${icon}</span>${label}</button>`).join('')}</nav><div class="side-footer"><div class="user-mini"><div class="avatar">${esc(state.session.name.slice(0,1))}</div><div><strong>${esc(state.session.name)}</strong><br><span class="hint">${esc(state.session.role)}</span></div></div><button class="btn ghost small" style="width:100%;margin-top:14px" onclick="logout()">Sair</button></div></aside>`;
-  };
-
-  const oldTopbarTransfers = renderTopbar;
-  window.renderTopbar = function(){
-    const titles = {dashboard:'Dashboard operacional', nova:'Nova devolução', devolucoes:'Devoluções', estoque:'Estoque Devolvido', transferencias:'Transferências', evidencias:'Central de Evidências', relatorios:'Relatórios', auditoria:'Trilha de auditoria', configuracoes:'Configurações'};
-    const subtitles = {dashboard:'Acompanhe volume, divergências, perdas e status dos processos.', nova:'Inicie pela chave da NF-e ou por upload do XML.', devolucoes:'Consulte, abra e finalize processos de devolução.', estoque:'Visualize saldos por SKU, item, localização ou destino.', transferencias:'Crie saídas para armazéns, descarte, outlet, fornecedor, reparo ou reembalagem.', evidencias:'Galeria central de fotos, vídeos, XMLs, PDFs e documentos anexados.', relatorios:'Exporte dados para auditoria, financeiro e marketplaces.', auditoria:'Histórico imutável de ações relevantes.', configuracoes:'Regras de negócio, permissões e parâmetros do sistema.'};
-    return `<header class="topbar no-print"><div><h1>${titles[state.route] || 'Aplicativo'}</h1><p>${subtitles[state.route] || ''}</p></div><div class="searchbar"><input placeholder="Buscar pedido, SKU, cliente, NF-e..." value="${esc(state.filters.returnSearch || '')}" oninput="state.filters.returnSearch=this.value; save(); if(['estoque','evidencias'].includes(state.route)) render()"><button class="btn primary" onclick="nav('nova')">Nova devolução</button></div></header>`;
-  };
-
-  const oldRouteTransfers = renderRoute;
-  window.renderRoute = function(){
-    ensureTransferState();
-    if(state.route === 'transferencias') return renderTransfersPanel();
-    if(state.route === 'estoque') return window.renderReturnedStock();
-    if(state.route === 'evidencias') return window.renderEvidenceCenter();
-    return oldRouteTransfers();
-  };
-
-  const baseAllStockRowsTransfers = allStockRows;
-  function transferKey(retId,itemId){ return `${retId}::${itemId}`; }
-  function stockKeyFromRow(r){ return transferKey(r.ret.id, r.item.id); }
-  function transferImpactForKey(key, ignoreTransferId=''){
-    ensureTransferState();
-    let reserved=0, transferred=0, discarded=0, writtenOff=0, inTransit=0;
-    (state.transferItems||[]).forEach(ti=>{
-      if(ti.stock_key !== key && transferKey(ti.return_id, ti.return_item_id) !== key) return;
-      const tr = (state.transfers||[]).find(t=>t.id===ti.transfer_id);
-      if(!tr || tr.id===ignoreTransferId || ['Cancelada','Recusada'].includes(tr.status)) return;
-      const q=Number(ti.quantity||0);
-      const type=String(tr.type||'').toLowerCase();
-      if(['Rascunho','Pendente de envio'].includes(tr.status)) reserved += q;
-      if(['Enviada','Em trânsito','Recebida','Parcialmente recebida','Finalizada'].includes(tr.status)){
-        if(type.includes('descarte')) discarded += q;
-        else if(type.includes('perda') || type.includes('doação')) writtenOff += q;
-        else transferred += q;
-        if(['Enviada','Em trânsito'].includes(tr.status)) inTransit += q;
-      }
-    });
-    return {reserved, transferred, discarded, writtenOff, inTransit};
-  }
-  function stockRowsWithTransfers(){
-    const base = baseAllStockRowsTransfers();
-    return base.map(r=>{
-      const key = stockKeyFromRow(r);
-      const imp = transferImpactForKey(key);
-      const physical = Number(r.qty||0);
-      const current = Math.max(0, physical - imp.transferred - imp.discarded - imp.writtenOff);
-      const available = Math.max(0, current - imp.reserved);
-      return {...r, stockKey:key, physicalQty:physical, currentBalance:current, availableQty:available, reservedQty:imp.reserved, transferredQty:imp.transferred, discardedQty:imp.discarded, writtenOffQty:imp.writtenOff, inTransitQty:imp.inTransit, qty:current, value:Number(r.item.unitValue||0)*current};
-    });
-  }
-  window.allStockRows = stockRowsWithTransfers;
-
-  function aggregateSkuWithTransfers(rows){
-    const map = new Map();
-    rows.forEach(r=>{
-      const key = r.sku || 'SEM-SKU';
-      if(!map.has(key)) map.set(key,{sku:key,ean:r.ean,product:r.product,total:0,current:0,value:0,reabastecimento:0,quarentena:0,reparo:0,reembalagem:0,descarte:0,contestacao:0,transferencia:0,outlet:0,aguardando:0,available:0,blocked:0,reserved:0,transferred:0,inTransit:0,writtenOff:0,discarded:0,returns:new Set(),lastReturnAt:'',rows:[]});
-      const g=map.get(key); const current=Number(r.currentBalance||0);
-      g.total += Number(r.physicalQty||0); g.current += current; g.value += Number(r.item.unitValue||0)*current; g.available += Number(r.availableQty||0); g.reserved += Number(r.reservedQty||0); g.transferred += Number(r.transferredQty||0); g.inTransit += Number(r.inTransitQty||0); g.writtenOff += Number(r.writtenOffQty||0); g.discarded += Number(r.discardedQty||0); g.returns.add(r.ret.id); g.rows.push(r); if(!g.lastReturnAt || new Date(r.ret.receivedAt||r.ret.createdAt)>new Date(g.lastReturnAt)) g.lastReturnAt=r.ret.receivedAt||r.ret.createdAt;
-      const d=(r.destination||'').toLowerCase(); const q=current;
-      if(d.includes('reabastecimento')) g.reabastecimento += q; else if(d.includes('quarentena')) g.quarentena += q; else if(d.includes('reparo')) g.reparo += q; else if(d.includes('reembalagem')) g.reembalagem += q; else if(d.includes('descarte')) g.descarte += q; else if(d.includes('contest')) g.contestacao += q; else if(d.includes('transfer')) g.transferencia += q; else if(d.includes('outlet')) g.outlet += q; else g.aguardando += q;
-      if(r.availability==='Disponível para venda' && current>0) g.available += 0; else g.blocked += q;
-    });
-    return [...map.values()].map(g=>({...g,relatedReturnsCount:g.returns.size}));
-  }
-
-  window.renderReturnedStock = function(){
-    const view = state.stockView || 'sku';
-    const rows = filterStockEvidenceRows(stockRowsWithTransfers());
-    const skuAgg = aggregateSkuWithTransfers(rows);
-    const totalPhysical = rows.reduce((s,r)=>s+Number(r.physicalQty||0),0);
-    const available = rows.reduce((s,r)=>s+Number(r.availableQty||0),0);
-    const reserved = rows.reduce((s,r)=>s+Number(r.reservedQty||0),0);
-    const transferred = rows.reduce((s,r)=>s+Number(r.transferredQty||0),0);
-    const writtenOff = rows.reduce((s,r)=>s+Number(r.writtenOffQty||0)+Number(r.discardedQty||0),0);
-    return `<section class="grid cols-4">${metricCard('Unidades físicas', num(totalPhysical), 'Recebidas na operação', '▥')}${metricCard('Saldo disponível', num(available), 'Pode ser movimentado', '✓')}${metricCard('Reservadas', num(reserved), 'Em transferência pendente', '⇄')}${metricCard('Baixadas/transferidas', num(transferred+writtenOff), 'Já saíram do saldo', '↗')}</section><div class="card" style="margin-top:18px"><div class="split"><div><h2>Estoque Devolvido</h2><p>Visão operacional com saldo real após transferências, descarte, perdas e reservas.</p></div><div class="row-actions"><button class="btn" onclick="nav('transferencias')">Transferências</button><button class="btn" onclick="exportSkuStockCsvTransfers()">Exportar SKU CSV</button><button class="btn" onclick="nav('evidencias')">Central de Evidências</button></div></div><div class="tabbar">${[['devolucao','Por devolução'],['item','Por item'],['sku','Por produto/SKU'],['localizacao','Por localização'],['destino','Por destino final']].map(([k,l])=>`<button class="${view===k?'active':''}" onclick="state.stockView='${k}'; save(); render()">${l}</button>`).join('')}</div><div class="form-grid two"><div class="field"><label>Busca</label><input value="${esc(state.filters.returnSearch||'')}" oninput="state.filters.returnSearch=this.value; render()" placeholder="SKU, produto, pedido, NF-e, cliente"></div><div class="field"><label>Filtro rápido</label><select onchange="state.filters.stockQuick=this.value; render()"><option ${!state.filters.stockQuick?'selected':''} value="">Todos</option><option ${state.filters.stockQuick==='available'?'selected':''} value="available">Com saldo disponível</option><option ${state.filters.stockQuick==='zero'?'selected':''} value="zero">Saldo zerado</option><option ${state.filters.stockQuick==='reserved'?'selected':''} value="reserved">Reservados</option><option ${state.filters.stockQuick==='diff'?'selected':''} value="diff">Com divergência física</option><option ${state.filters.stockQuick==='positive'?'selected':''} value="positive">Qtd física maior que NF-e</option></select></div></div></div><div class="card" style="margin-top:18px">${view==='sku'?renderStockSkuTransferTable(skuAgg):view==='item'?renderStockItemTransferTable(rows):view==='localizacao'?groupEvidenceStock(rows,'location','Localização'):view==='destino'?groupEvidenceStock(rows,'destination','Destino final'):groupEvidenceStock(rows,'returnCode','Devolução')}</div>`;
-  };
-
-  function renderStockSkuTransferTable(list){
-    if(!list.length) return empty('Sem estoque devolvido para exibir.');
-    return `<h2>Estoque por Produto/SKU</h2><div class="table-wrap" style="margin-top:14px"><table class="wide-table"><thead><tr><th class="sticky-first">SKU</th><th>Produto</th><th>Total físico</th><th>Saldo atual</th><th>Disponível</th><th>Reservado</th><th>Transferido</th><th>Em trânsito</th><th>Baixado</th><th>Descartado</th><th>Reabast.</th><th>Quarentena</th><th>Reparo</th><th>Reembal.</th><th>Descarte</th><th>Contest.</th><th>Aguard.</th><th>Valor saldo</th><th>Ações</th></tr></thead><tbody>${list.map(g=>`<tr><td class="sticky-first"><strong>${esc(g.sku)}</strong><br><span class="hint">EAN ${esc(g.ean||'-')}</span></td><td>${esc(g.product||'-')}</td><td><strong>${num(g.total)}</strong></td><td><strong>${num(g.current)}</strong></td><td>${num(g.available)}</td><td>${num(g.reserved)}</td><td>${num(g.transferred)}</td><td>${num(g.inTransit)}</td><td>${num(g.writtenOff)}</td><td>${num(g.discarded)}</td><td>${num(g.reabastecimento)}</td><td>${num(g.quarentena)}</td><td>${num(g.reparo)}</td><td>${num(g.reembalagem)}</td><td>${num(g.descarte)}</td><td>${num(g.contestacao)}</td><td>${num(g.aguardando)}</td><td>${money(g.value)}</td><td><button class="btn small" onclick="openSkuDetail('${esc(g.sku)}')">Detalhe</button></td></tr>`).join('')}</tbody></table></div>`;
-  }
-  function renderStockItemTransferTable(rows){
-    if(!rows.length) return empty('Sem itens.');
-    return `<h2>Estoque por item</h2><div class="table-wrap"><table class="wide-table"><thead><tr><th>Devolução</th><th>SKU</th><th>Produto</th><th>Qtd NF-e</th><th>Qtd física</th><th>Dif.</th><th>Disponível</th><th>Reservado</th><th>Transferido</th><th>Baixado</th><th>Saldo atual</th><th>Destino</th><th>Evidências</th><th>Ações</th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${esc(r.ret.code)}</strong><br><span class="hint">${esc(r.ret.orderNumber||'-')}</span></td><td>${esc(r.sku)}</td><td>${esc(r.product)}</td><td>${num(r.item.invoice_quantity)}</td><td>${num(r.physicalQty)}</td><td>${r.item.quantity_difference>0?'+':''}${num(r.item.quantity_difference)}</td><td>${num(r.availableQty)}</td><td>${num(r.reservedQty)}</td><td>${num(r.transferredQty)}</td><td>${num(r.writtenOffQty+r.discardedQty)}</td><td><strong>${num(r.currentBalance)}</strong></td><td>${destBadge(r.destination)}</td><td><button class="btn small" onclick="openItemEvidenceGallery('${r.item.id}')">▧ ${r.evidenceCount||0}</button></td><td><button class="btn small" onclick="nav('transferencias'); setTimeout(()=>openTransferModal('${r.stockKey}'),50)">Transferir</button></td></tr>`).join('')}</tbody></table></div>`;
-  }
-  function enhancedFilterStockRows(rows){
-    let out = oldFilterStockEvidenceRows(rows);
-    const f=state.filters.stockQuick;
-    if(f==='available') out=out.filter(r=>Number(r.availableQty||0)>0);
-    if(f==='zero') out=out.filter(r=>Number(r.currentBalance||0)<=0);
-    if(f==='reserved') out=out.filter(r=>Number(r.reservedQty||0)>0);
-    return out;
-  }
-  const oldFilterStockEvidenceRows = filterStockEvidenceRows;
-  window.filterStockEvidenceRows = function(rows){ return enhancedFilterStockRows(rows); };
-
-  function transferTotals(){
-    ensureTransferState();
-    const list=state.transfers||[];
-    return {total:list.length, draft:list.filter(t=>t.status==='Rascunho').length, pending:list.filter(t=>t.status==='Pendente de envio').length, transit:list.filter(t=>['Enviada','Em trânsito'].includes(t.status)).length, received:list.filter(t=>['Recebida','Finalizada'].includes(t.status)).length, canceled:list.filter(t=>t.status==='Cancelada').length, discard:list.filter(t=>String(t.type).toLowerCase().includes('descarte')).length, qty:list.reduce((s,t)=>s+Number(t.total_quantity||0),0), value:list.reduce((s,t)=>s+Number(t.total_value||0),0), discardValue:list.filter(t=>String(t.type).toLowerCase().includes('descarte')).reduce((s,t)=>s+Number(t.total_value||0),0)};
-  }
-
-  function renderTransfersPanel(){
-    ensureTransferState();
-    const t=transferTotals(); const tab=state.transferTab||'transferencias';
-    return `<section class="grid cols-4">${metricCard('Transferências',t.total,'Total criado','⇄')}${metricCard('Pendentes',t.pending,'Aguardam envio','◷')}${metricCard('Em trânsito',t.transit,'Aguardam recebimento','→')}${metricCard('Valor transferido',money(t.value),'Todos os destinos','R$')}</section><div class="card" style="margin-top:18px"><div class="split"><div><h2>Transferências</h2><p>Controle saídas de produtos devolvidos para armazéns, depósitos, outlet, fornecedor, reparo, reembalagem ou descarte.</p></div><div class="row-actions"><button class="btn primary" onclick="openTransferModal()">Nova transferência</button><button class="btn" onclick="openWarehouseModal()">Cadastrar destino</button><button class="btn" onclick="exportTransfersCsv()">Exportar CSV</button><button class="btn" onclick="exportTransfersJson()">Exportar JSON</button></div></div><div class="tabbar"><button class="${tab==='transferencias'?'active':''}" onclick="state.transferTab='transferencias'; save(); render()">Transferências</button><button class="${tab==='warehouses'?'active':''}" onclick="state.transferTab='warehouses'; save(); render()">Armazéns / Destinos</button></div><div class="field" style="max-width:460px"><label>Busca</label><input value="${esc(state.filters.transferSearch||'')}" oninput="state.filters.transferSearch=this.value; render()" placeholder="Código, destino, SKU, transportadora, rastreio..."></div></div>${tab==='warehouses'?renderWarehousesTable():renderTransfersTable()}`;
-  }
-  window.renderTransfersPanel = renderTransfersPanel;
-
-  function filteredTransfers(){
-    const q=(state.filters.transferSearch||'').toLowerCase().trim(); let list=state.transfers||[];
-    if(q) list=list.filter(t=>[t.code,t.type,t.destination_name,t.destination_address,t.destination_contact,t.status,t.carrier,t.tracking_code,t.document_number,(state.transferItems||[]).filter(i=>i.transfer_id===t.id).map(i=>i.sku+' '+i.product_name).join(' ')].join(' ').toLowerCase().includes(q));
-    return list;
-  }
-  function renderTransfersTable(){
-    const list=filteredTransfers();
-    return `<div class="card" style="margin-top:18px"><h2>Painel de transferências</h2>${list.length?`<div class="table-wrap"><table class="wide-table"><thead><tr><th>Código</th><th>Tipo</th><th>Destino</th><th>Endereço</th><th>Itens</th><th>Qtd</th><th>Valor</th><th>Status</th><th>Criada por</th><th>Envio</th><th>Recebimento</th><th>Ações</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(t.code)}</strong><br><span class="hint">${brDate(t.created_at)}</span></td><td>${esc(t.type)}</td><td>${esc(t.destination_name)}</td><td>${esc(t.destination_address||'-')}</td><td>${(state.transferItems||[]).filter(i=>i.transfer_id===t.id).length}</td><td>${num(t.total_quantity)}</td><td>${money(t.total_value)}</td><td>${statusBadgeTransfer(t.status)}</td><td>${esc(t.created_by||'-')}</td><td>${brDate(t.shipped_at)}</td><td>${brDate(t.received_at)}</td><td><div class="row-actions"><button class="btn small" onclick="openTransferDetail('${t.id}')">Detalhe</button>${['Rascunho','Pendente de envio'].includes(t.status)?`<button class="btn small" onclick="confirmTransferShipment('${t.id}')">Confirmar envio</button><button class="btn danger small" onclick="cancelTransfer('${t.id}')">Cancelar</button>`:''}${['Enviada','Em trânsito'].includes(t.status)?`<button class="btn small" onclick="confirmTransferReceipt('${t.id}')">Confirmar recebimento</button>`:''}</div></td></tr>`).join('')}</tbody></table></div>`:empty('Nenhuma transferência criada.')}</div>`;
-  }
-  function statusBadgeTransfer(status){ const color={Rascunho:'gray','Pendente de envio':'yellow',Enviada:'blue','Em trânsito':'blue',Recebida:'green','Parcialmente recebida':'orange',Cancelada:'gray',Recusada:'red',Finalizada:'green'}[status]||'gray'; return `<span class="badge ${color}">${esc(status||'-')}</span>`; }
-  function renderWarehousesTable(){
-    const list=state.warehouses||[];
-    return `<div class="card" style="margin-top:18px"><div class="split"><h2>Armazéns / Destinos</h2><button class="btn primary" onclick="openWarehouseModal()">Cadastrar destino</button></div><div class="table-wrap"><table><thead><tr><th>Nome</th><th>Tipo</th><th>Responsável</th><th>Contato</th><th>Endereço</th><th>Status</th><th>Ações</th></tr></thead><tbody>${list.map(w=>`<tr><td><strong>${esc(w.name)}</strong><br><span class="hint">${esc(w.document||'Sem CNPJ')}</span></td><td>${esc(w.type)}</td><td>${esc(w.responsible||'-')}</td><td>${esc(w.phone||'-')}<br><span class="hint">${esc(w.email||'')}</span></td><td>${esc(w.full_address||formatWarehouseAddress(w))}</td><td>${w.is_active?'Ativo':'Inativo'}</td><td><button class="btn small" onclick="openWarehouseModal('${w.id}')">Editar</button></td></tr>`).join('')}</tbody></table></div></div>`;
-  }
-  function formatWarehouseAddress(w){ return [w.address,w.number,w.complement,w.district,w.city,w.state].filter(Boolean).join(', '); }
-
-  window.openWarehouseModal = function(id=''){
-    ensureTransferState(); const w=(state.warehouses||[]).find(x=>x.id===id) || {id:'', name:'', type:'Armazém', document:'', responsible:'', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'', state:'', notes:'', is_active:true};
-    const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card"><div class="split"><h2>${id?'Editar':'Cadastrar'} armazém / destino</h2><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><form onsubmit="saveWarehouse(event,'${id}')"><div class="form-grid"><div class="field"><label>Nome do local *</label><input id="wh_name" required value="${esc(w.name)}"></div><div class="field"><label>Tipo</label><select id="wh_type">${['Armazém','Depósito','CD','Loja','Outlet','Área de descarte','Fornecedor','Operador logístico','Reparo','Reembalagem','Quarentena externa','Outro'].map(x=>`<option ${w.type===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>CNPJ</label><input id="wh_document" value="${esc(w.document)}"></div><div class="field"><label>Responsável</label><input id="wh_responsible" value="${esc(w.responsible)}"></div><div class="field"><label>Telefone</label><input id="wh_phone" value="${esc(w.phone)}"></div><div class="field"><label>E-mail</label><input id="wh_email" value="${esc(w.email)}"></div><div class="field"><label>CEP</label><input id="wh_zip" value="${esc(w.zip_code)}"></div><div class="field"><label>Endereço</label><input id="wh_address" value="${esc(w.address)}"></div><div class="field"><label>Número</label><input id="wh_number" value="${esc(w.number)}"></div><div class="field"><label>Complemento</label><input id="wh_complement" value="${esc(w.complement)}"></div><div class="field"><label>Bairro</label><input id="wh_district" value="${esc(w.district)}"></div><div class="field"><label>Cidade</label><input id="wh_city" value="${esc(w.city)}"></div><div class="field"><label>UF</label><input id="wh_state" maxlength="2" value="${esc(w.state)}"></div><div class="field"><label>Status</label><select id="wh_active"><option value="true" ${w.is_active?'selected':''}>Ativo</option><option value="false" ${!w.is_active?'selected':''}>Inativo</option></select></div></div><div class="field"><label>Observações</label><textarea id="wh_notes">${esc(w.notes)}</textarea></div><button class="btn primary" type="submit">Salvar destino</button></form></div>`; document.body.appendChild(modal);
-  };
-  window.saveWarehouse = function(event,id=''){
-    event.preventDefault(); ensureTransferState();
-    const data={id:id||uid('wh'), name:val('wh_name'), type:val('wh_type'), document:val('wh_document'), responsible:val('wh_responsible'), phone:val('wh_phone'), email:val('wh_email'), zip_code:val('wh_zip'), address:val('wh_address'), number:val('wh_number'), complement:val('wh_complement'), district:val('wh_district'), city:val('wh_city'), state:val('wh_state'), notes:val('wh_notes'), is_active:val('wh_active')==='true', updated_at:nowIso()}; data.full_address=formatWarehouseAddress(data);
-    const idx=state.warehouses.findIndex(w=>w.id===data.id); if(idx>=0) state.warehouses[idx]={...state.warehouses[idx],...data}; else {data.created_at=nowIso(); state.warehouses.unshift(data);} addAudit(id?'Destino atualizado':'Destino cadastrado','warehouse',data.id,data.name); save(); document.querySelector('.sku-modal')?.remove(); render();
-  };
-  function val(id){ return (document.getElementById(id)?.value || '').trim(); }
-
-  window.openTransferModal = function(preselectKey=''){
-    ensureTransferState(); const rows=stockRowsWithTransfers().filter(r=>r.availableQty>0); const wh=state.warehouses.filter(w=>w.is_active!==false);
-    const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card"><div class="split"><div><h2>Nova transferência</h2><p>Selecione destino e itens do estoque devolvido. O saldo será baixado ao confirmar envio.</p></div><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><form onsubmit="createTransfer(event)"><div class="form-grid"><div class="field"><label>Tipo *</label><select id="tr_type">${TRANSFER_TYPES.map(x=>`<option>${x}</option>`).join('')}</select></div><div class="field"><label>Destino cadastrado</label><select id="tr_destination" onchange="fillDestinationInfo()"><option value="">Destino manual</option>${wh.map(w=>`<option value="${esc(w.id)}">${esc(w.name)} · ${esc(w.type)}</option>`).join('')}</select></div><div class="field"><label>Nome do destino *</label><input id="tr_destination_name" required></div><div class="field"><label>Responsável / contato</label><input id="tr_destination_contact"></div><div class="field"><label>Data prevista de envio</label><input id="tr_expected_ship" type="date"></div><div class="field"><label>Data prevista de recebimento</label><input id="tr_expected_receive" type="date"></div><div class="field"><label>Transportadora</label><input id="tr_carrier"></div><div class="field"><label>Rastreio</label><input id="tr_tracking"></div><div class="field"><label>Documento interno / NF</label><input id="tr_document"></div></div><div class="field"><label>Endereço completo *</label><input id="tr_destination_address" required></div><div class="field"><label>Observações / motivo</label><textarea id="tr_notes" placeholder="Motivo da transferência, instruções, observações de descarte etc."></textarea></div><h3 style="margin-top:16px">Itens disponíveis</h3><div class="table-wrap" style="max-height:360px"><table class="wide-table"><thead><tr><th>Selecionar</th><th>SKU</th><th>Produto</th><th>Pedido/NF</th><th>Destino atual</th><th>Disponível</th><th>Qtd a transferir</th><th>Valor</th></tr></thead><tbody>${rows.map(r=>`<tr><td><input type="checkbox" class="tr_select" data-key="${esc(r.stockKey)}" ${preselectKey===r.stockKey?'checked':''}></td><td><strong>${esc(r.sku)}</strong><br><span class="hint">${esc(r.ean||'-')}</span></td><td>${esc(r.product)}</td><td>${esc(r.ret.orderNumber||'-')}<br><span class="hint">NF ${esc(r.ret.invoice?.number||'-')}</span></td><td>${destBadge(r.destination)}</td><td>${num(r.availableQty)}</td><td><input type="number" min="0" step="1" max="${esc(r.availableQty)}" value="${preselectKey===r.stockKey?Math.min(1,r.availableQty):0}" class="tr_qty" data-key="${esc(r.stockKey)}" style="width:100px"></td><td>${money(Number(r.item.unitValue||0)*r.availableQty)}</td></tr>`).join('')}</tbody></table></div><div class="row-actions" style="margin-top:16px"><button class="btn primary" type="submit">Criar transferência pendente</button><button class="btn" type="button" onclick="this.closest('.sku-modal').remove()">Cancelar</button></div></form></div>`; document.body.appendChild(modal);
-  };
-  window.fillDestinationInfo = function(){ const id=val('tr_destination'); const w=state.warehouses.find(x=>x.id===id); if(!w) return; document.getElementById('tr_destination_name').value=w.name||''; document.getElementById('tr_destination_contact').value=[w.responsible,w.phone,w.email].filter(Boolean).join(' · '); document.getElementById('tr_destination_address').value=w.full_address||formatWarehouseAddress(w); };
-  window.createTransfer = function(event){
-    event.preventDefault(); ensureTransferState(); const type=val('tr_type'); const destName=val('tr_destination_name'); const destAddr=val('tr_destination_address'); if(!destName||!destAddr) return alert('Destino e endereço são obrigatórios.');
-    const selected=[]; document.querySelectorAll('.tr_select:checked').forEach(ch=>{ const key=ch.dataset.key; const q=Number(document.querySelector(`.tr_qty[data-key="${CSS.escape(key)}"]`)?.value||0); if(q>0) selected.push({key,q}); });
-    if(!selected.length) return alert('Adicione ao menos um item com quantidade maior que zero.'); const rows=stockRowsWithTransfers(); const items=[];
-    for(const s of selected){ const r=rows.find(x=>x.stockKey===s.key); if(!r) return alert('Item não encontrado.'); if(s.q>Number(r.availableQty||0)) return alert(`Quantidade maior que saldo disponível para ${r.sku}. Disponível: ${r.availableQty}`); items.push({r, quantity:s.q}); }
-    if(type.toLowerCase().includes('descarte') && !['Administrador','Supervisor'].includes(state.session.role)) return alert('Transferência para descarte exige Administrador ou Supervisor.');
-    const tr={id:uid('tr'), code:'TRF-'+String((state.transfers||[]).length+1).padStart(5,'0'), type, destination_id:val('tr_destination'), destination_name:destName, destination_type:(state.warehouses.find(w=>w.id===val('tr_destination'))||{}).type||'', destination_address:destAddr, destination_contact:val('tr_destination_contact'), status:'Pendente de envio', created_by:state.session.name, created_at:nowIso(), expected_ship_date:val('tr_expected_ship'), expected_receive_date:val('tr_expected_receive'), shipped_at:'', received_at:'', carrier:val('tr_carrier'), tracking_code:val('tr_tracking'), document_number:val('tr_document'), notes:val('tr_notes'), approval_status:type.toLowerCase().includes('descarte')?'Aprovado pelo criador autorizado':'Não aplicável', total_quantity:0, total_value:0, evidence_ids:[], evidences:[], audit_history:[]};
-    state.transfers.unshift(tr);
-    items.forEach(({r,quantity})=>{ const total=Number(r.item.unitValue||0)*quantity; tr.total_quantity+=quantity; tr.total_value+=total; state.transferItems.push({id:uid('tri'), transfer_id:tr.id, stock_key:r.stockKey, returned_stock_id:r.stockKey, return_id:r.ret.id, return_item_id:r.item.id, sku:r.sku, ean:r.ean, product_name:r.product, quantity, unit_value:Number(r.item.unitValue||0), total_value:total, origin_location:r.location, destination_location:destName, balance_before:r.currentBalance, balance_after:Math.max(0,r.currentBalance-quantity), status:'Reservado', notes:''}); });
-    tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Transferência criada', detail:`${tr.total_quantity} unidade(s) reservadas para ${destName}`}); addAudit('Transferência criada','transfer',tr.id,`${tr.code} · ${tr.destination_name} · ${tr.total_quantity} unidades`); save(); document.querySelector('.sku-modal')?.remove(); render();
-  };
-
-  window.confirmTransferShipment = function(id){ const tr=state.transfers.find(t=>t.id===id); if(!tr) return; if(!['Rascunho','Pendente de envio'].includes(tr.status)) return alert('Apenas transferências pendentes podem ter envio confirmado.'); if(String(tr.type).toLowerCase().includes('descarte') && !['Administrador','Supervisor'].includes(state.session.role)) return alert('Descarte exige aprovação de Supervisor ou Administrador.'); if(!confirm(`Confirmar envio da ${tr.code}? O saldo do estoque devolvido será baixado.`)) return; tr.status=String(tr.type).toLowerCase().includes('descarte') || String(tr.type).toLowerCase().includes('perda') ? 'Finalizada' : 'Enviada'; tr.shipped_at=nowIso(); tr.audit_history=tr.audit_history||[]; tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Envio confirmado', detail:'Saldo baixado no estoque devolvido.'}); (state.transferItems||[]).filter(i=>i.transfer_id===id).forEach(i=>i.status='Enviada'); addAudit('Envio de transferência confirmado','transfer',tr.id,`${tr.code} · baixa de ${tr.total_quantity} unidade(s)`); save(); render(); };
-  window.confirmTransferReceipt = function(id){ const tr=state.transfers.find(t=>t.id===id); if(!tr) return; if(!['Enviada','Em trânsito'].includes(tr.status)) return alert('Apenas transferências enviadas podem ser recebidas.'); const resp=prompt('Responsável pelo recebimento:', state.session.name); if(resp===null) return; tr.status='Recebida'; tr.received_at=nowIso(); tr.received_by=resp||state.session.name; tr.audit_history=tr.audit_history||[]; tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Recebimento confirmado', detail:`Recebido por ${tr.received_by}`}); (state.transferItems||[]).filter(i=>i.transfer_id===id).forEach(i=>i.status='Recebida'); addAudit('Recebimento de transferência confirmado','transfer',tr.id,tr.code); save(); render(); };
-  window.cancelTransfer = function(id){ const tr=state.transfers.find(t=>t.id===id); if(!tr) return; if(['Enviada','Em trânsito','Recebida','Finalizada'].includes(tr.status) && state.session.role!=='Administrador') return alert('Após envio, apenas Administrador pode cancelar.'); const reason=prompt('Motivo do cancelamento:'); if(!reason) return; tr.status='Cancelada'; tr.canceled_at=nowIso(); tr.cancel_reason=reason; tr.audit_history=tr.audit_history||[]; tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Transferência cancelada', detail:reason}); addAudit('Transferência cancelada','transfer',tr.id,reason); save(); render(); };
-
-  window.openTransferDetail = function(id){ const tr=state.transfers.find(t=>t.id===id); if(!tr) return; const items=(state.transferItems||[]).filter(i=>i.transfer_id===id); const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card"><div class="split"><div><h2>${esc(tr.code)} · ${esc(tr.type)}</h2><p>${statusBadgeTransfer(tr.status)} · ${esc(tr.destination_name)} · ${esc(tr.destination_address||'')}</p></div><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><section class="grid cols-4" style="margin-top:14px">${metricCard('Quantidade',num(tr.total_quantity),'Unidades','▥')}${metricCard('Valor',money(tr.total_value),'Total','R$')}${metricCard('Itens',items.length,'SKUs/itens','SKU')}${metricCard('Evidências',(tr.evidences||[]).filter(e=>e.status!=='Excluída').length,'Arquivos','▧')}</section><div class="grid cols-2" style="margin-top:14px"><div class="card"><h2>Dados gerais</h2><p><strong>Destino:</strong> ${esc(tr.destination_name)}<br><strong>Endereço:</strong> ${esc(tr.destination_address||'-')}<br><strong>Contato:</strong> ${esc(tr.destination_contact||'-')}<br><strong>Transportadora:</strong> ${esc(tr.carrier||'-')}<br><strong>Rastreio:</strong> ${esc(tr.tracking_code||'-')}<br><strong>Documento:</strong> ${esc(tr.document_number||'-')}<br><strong>Observações:</strong> ${esc(tr.notes||'-')}</p></div><div class="card"><h2>Evidências da transferência</h2><input type="file" multiple onchange="handleTransferEvidenceUpload(this,'${tr.id}')"><div style="margin-top:10px">${renderTransferEvidenceMini(tr)}</div></div></div><div class="card" style="margin-top:14px"><h2>Itens</h2><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Produto</th><th>Pedido/NF</th><th>Qtd</th><th>Valor</th><th>Origem</th><th>Destino</th><th>Saldo antes</th><th>Saldo após</th><th>Status</th></tr></thead><tbody>${items.map(i=>`<tr><td>${esc(i.sku)}<br><span class="hint">${esc(i.ean||'-')}</span></td><td>${esc(i.product_name)}</td><td>${esc(i.return_id)}<br><span class="hint">${esc(i.return_item_id)}</span></td><td>${num(i.quantity)}</td><td>${money(i.total_value)}</td><td>${esc(i.origin_location||'-')}</td><td>${esc(i.destination_location||'-')}</td><td>${num(i.balance_before)}</td><td>${num(i.balance_after)}</td><td>${esc(i.status)}</td></tr>`).join('')}</tbody></table></div></div><div class="card" style="margin-top:14px"><h2>Histórico</h2>${renderTransferTimeline(tr)}</div></div>`; document.body.appendChild(modal); };
-  function renderTransferTimeline(tr){ const logs=tr.audit_history||[]; return logs.length?`<div class="timeline">${logs.map(l=>`<div><strong>${esc(l.action)}</strong><br><span class="hint">${brDate(l.at)} · ${esc(l.user||'-')}</span><p>${esc(l.detail||'')}</p></div>`).join('')}</div>`:empty('Sem histórico.'); }
-  function renderTransferEvidenceMini(tr){ const evs=(tr.evidences||[]).filter(e=>e.status!=='Excluída'); return evs.length?`<div class="evidence-grid">${evs.map(ev=>`<div class="evidence"><strong>${esc(ev.name)}</strong><br><span class="hint">${esc(ev.uploadedBy||'-')}</span>${ev.preview?`<img src="${ev.preview}" onclick="openEvidenceViewer('${ev.id}')" style="cursor:zoom-in">`:`<div class="media-thumb" style="height:80px">${fileIcon(ev)}</div>`}<button class="btn small" onclick="openEvidenceViewer('${ev.id}')">Abrir</button></div>`).join('')}</div>`:'<p class="hint">Nenhuma evidência anexada.</p>'; }
-  window.handleTransferEvidenceUpload = function(input, transferId){ const tr=state.transfers.find(t=>t.id===transferId); if(!tr) return; const files=Array.from(input.files||[]); if(!files.length) return; let pending=files.length; files.forEach(file=>{ const ev={id:uid('ev'), name:file.name, originalName:file.name, type:file.type||mimeFromName(file.name), size:file.size, uploadedBy:state.session.name, uploadedAt:nowIso(), transferId:tr.id, transferCode:tr.code, returnCode:tr.code, sku:'Transferência', product:tr.destination_name, evidenceType:inferTransferEvidenceType(file.name,file.type,tr.type), notes:'', status:'Ativa', dataUrl:'', preview:''}; const reader=new FileReader(); reader.onload=function(){ ev.dataUrl=String(reader.result||''); if((file.type||'').startsWith('image/')) ev.preview=ev.dataUrl; tr.evidences=tr.evidences||[]; tr.evidences.push(ev); tr.evidence_ids=tr.evidence_ids||[]; tr.evidence_ids.push(ev.id); tr.audit_history=tr.audit_history||[]; tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Evidência anexada', detail:file.name}); addAudit('Evidência de transferência anexada','transfer',tr.id,file.name); pending--; if(pending===0){ save(); document.querySelector('.sku-modal')?.remove(); openTransferDetail(tr.id); }}; reader.readAsDataURL(file); }); input.value=''; };
-  function inferTransferEvidenceType(name,type,trType){ const n=(name||'').toLowerCase(); if(String(trType).toLowerCase().includes('descarte')) return 'Descarte'; if(n.includes('coleta')) return 'Comprovante de coleta'; if(n.includes('entrega')) return 'Comprovante de entrega'; if(n.includes('carga')) return 'Foto da carga'; if(n.endsWith('.xml')) return 'XML'; if(n.endsWith('.pdf')) return 'Documento de transferência'; return inferEvidenceType(name,type); }
-
-  function allEvidenceCombined(){ const rows=[]; try{ previousAllEvidenceSafe().forEach(e=>rows.push(e)); }catch(e){} (state.transfers||[]).forEach(tr=>(tr.evidences||[]).forEach(ev=>rows.push({...ev, transfer:tr, returnCode:tr.code, orderNumber:'', invoiceNumber:tr.document_number||'', sku:ev.sku||'Transferência', product:tr.destination_name}))); return rows; }
-  function previousAllEvidenceSafe(){ return (typeof allEvidence==='function') ? allEvidence() : []; }
-  window.allEvidence = allEvidenceCombined;
-  window.openEvidenceViewer = function(evId){ const list=allEvidenceCombined().filter(e=>e.status!=='Excluída'); let idx=Math.max(0,list.findIndex(e=>e.id===evId)); if(!list.length || idx<0) return; let zoom=1, rotate=0; const modal=document.createElement('div'); modal.className='viewer-modal'; function draw(){ const ev=list[idx]; modal.innerHTML=`<div class="viewer-card"><div class="viewer-stage">${viewerContent(ev,zoom,rotate)}<div class="viewer-nav"><button class="btn ghost" onclick="window.__evPrev2()">← Anterior</button><button class="btn ghost" onclick="window.__evNext2()">Próxima →</button></div></div><aside class="viewer-side"><div class="split"><h2>Evidência</h2><button class="btn ghost small" onclick="document.querySelector('.viewer-modal').remove()">Fechar</button></div><p><strong>${esc(ev.name)}</strong></p><div class="viewer-tools"><button class="btn small" onclick="window.__evZoomIn2()">Zoom +</button><button class="btn small" onclick="window.__evZoomOut2()">Zoom -</button><button class="btn small" onclick="window.__evRotate2()">Girar</button>${ev.dataUrl?`<button class="btn small" onclick="downloadEvidence('${ev.id}')">Baixar</button>`:''}</div><div class="media-meta"><strong>Tipo:</strong> ${esc(ev.evidenceType||evidenceGroup(ev))}<br><strong>Upload:</strong> ${brDate(ev.uploadedAt)}<br><strong>Usuário:</strong> ${esc(ev.uploadedBy||'-')}<br><strong>Origem:</strong> ${ev.transfer?'Transferência':'Devolução'}<br><strong>Código:</strong> ${esc(ev.returnCode||ev.transferCode||'-')}<br><strong>Documento:</strong> ${esc(ev.invoiceNumber||'-')}<br><strong>SKU:</strong> ${esc(ev.sku||'-')}<br><strong>Produto/Destino:</strong> ${esc(ev.product||'-')}<br><strong>Tamanho:</strong> ${formatBytes(ev.size||0)}</div></aside></div>`; } window.__evPrev2=()=>{idx=(idx-1+list.length)%list.length;zoom=1;rotate=0;draw();}; window.__evNext2=()=>{idx=(idx+1)%list.length;zoom=1;rotate=0;draw();}; window.__evZoomIn2=()=>{zoom=Math.min(3,zoom+.25);draw();}; window.__evZoomOut2=()=>{zoom=Math.max(.5,zoom-.25);draw();}; window.__evRotate2=()=>{rotate=(rotate+90)%360;draw();}; draw(); document.body.appendChild(modal); };
-  window.downloadEvidence = function(evId){ const ev=allEvidenceCombined().find(e=>e.id===evId); if(!ev||!ev.dataUrl) return alert('Arquivo sem conteúdo salvo.'); const a=document.createElement('a'); a.href=ev.dataUrl; a.download=ev.name||'evidencia'; document.body.appendChild(a); a.click(); a.remove(); addAudit('Download de evidência','evidence',ev.id,ev.name||''); save(); };
-  const oldRenderEvidenceCenterCombined = renderEvidenceCenter;
-  window.renderEvidenceCenter = function(){ state.mediaFilters=state.mediaFilters||{q:'',type:'Todos',status:'Ativas',sort:'recent'}; let list=allEvidenceCombined(); const q=(state.mediaFilters.q||state.filters.returnSearch||'').toLowerCase().trim(); if(q) list=list.filter(ev=>[ev.name,ev.evidenceType,ev.sku,ev.product,ev.returnCode,ev.transferCode,ev.orderNumber,ev.invoiceNumber,ev.uploadedBy,ev.notes].join(' ').toLowerCase().includes(q)); if(state.mediaFilters.type!=='Todos') list=list.filter(ev=>evidenceGroup(ev)===state.mediaFilters.type||ev.evidenceType===state.mediaFilters.type); if(state.mediaFilters.status==='Ativas') list=list.filter(ev=>ev.status!=='Excluída'); if(state.mediaFilters.status==='Excluídas') list=list.filter(ev=>ev.status==='Excluída'); if(state.mediaFilters.sort==='old') list.sort((a,b)=>new Date(a.uploadedAt)-new Date(b.uploadedAt)); else list.sort((a,b)=>new Date(b.uploadedAt)-new Date(a.uploadedAt)); const totalSize=list.reduce((s,ev)=>s+Number(ev.size||0),0); return `<section class="grid cols-4">${metricCard('Evidências',list.length,'Arquivos filtrados','▧')}${metricCard('Imagens',list.filter(e=>evidenceGroup(e)==='Imagem').length,'Fotos e previews','IMG')}${metricCard('Transferências',(state.transfers||[]).reduce((s,t)=>s+(t.evidences||[]).length,0),'Arquivos de saída','⇄')}${metricCard('Tamanho',formatBytes(totalSize),'Volume exibido','MB')}</section><div class="card" style="margin-top:18px"><div class="split"><div><h2>Central de Evidências</h2><p>Fotos, vídeos, PDFs, XMLs e documentos vinculados a devoluções, itens e transferências.</p></div><div class="row-actions"><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button><button class="btn" onclick="window.print()">Imprimir / PDF</button></div></div><div class="form-grid"><div class="field"><label>Busca</label><input value="${esc(state.mediaFilters.q||'')}" oninput="state.mediaFilters.q=this.value; save(); render()" placeholder="Arquivo, SKU, transferência, pedido, NF-e"></div><div class="field"><label>Tipo</label><select onchange="state.mediaFilters.type=this.value; save(); render()"><option ${state.mediaFilters.type==='Todos'?'selected':''}>Todos</option><option ${state.mediaFilters.type==='Imagem'?'selected':''}>Imagem</option><option ${state.mediaFilters.type==='Vídeo'?'selected':''}>Vídeo</option><option ${state.mediaFilters.type==='Documento'?'selected':''}>Documento</option><option ${state.mediaFilters.type==='Descarte'?'selected':''}>Descarte</option><option ${state.mediaFilters.type==='Documento de transferência'?'selected':''}>Documento de transferência</option></select></div><div class="field"><label>Status</label><select onchange="state.mediaFilters.status=this.value; save(); render()"><option ${state.mediaFilters.status==='Ativas'?'selected':''}>Ativas</option><option ${state.mediaFilters.status==='Excluídas'?'selected':''}>Excluídas</option><option ${state.mediaFilters.status==='Todas'?'selected':''}>Todas</option></select></div><div class="field"><label>Ordenação</label><select onchange="state.mediaFilters.sort=this.value; save(); render()"><option value="recent" ${state.mediaFilters.sort==='recent'?'selected':''}>Mais recentes</option><option value="old" ${state.mediaFilters.sort==='old'?'selected':''}>Mais antigas</option></select></div></div></div><div class="card" style="margin-top:18px">${list.length?`<div class="media-grid">${list.map(ev=>mediaCard(ev)).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`; };
-  window.exportEvidenceCsv = function(){ const rows=[['ID','Arquivo','Tipo','Status','Origem','Código','Documento','SKU','Produto/Destino','Usuario','Data','Tamanho','Observacao']]; allEvidenceCombined().forEach(ev=>rows.push([ev.id,ev.name,ev.evidenceType||evidenceGroup(ev),ev.status||'Ativa',ev.transfer?'Transferência':'Devolução',ev.returnCode||ev.transferCode||'',ev.invoiceNumber||'',ev.sku||'',ev.product||'',ev.uploadedBy||'',brDate(ev.uploadedAt),ev.size||0,ev.notes||''])); download('central-evidencias.csv',rows.map(row=>row.map(csvEscape).join(';')).join('\n'),'text/csv;charset=utf-8'); };
-
-  window.exportTransfersCsv = function(){ const rows=[['Codigo','Tipo','Destino','Endereco','Status','Criada por','Criada em','Envio','Recebimento','Qtd','Valor','Transportadora','Rastreio','Documento']]; (state.transfers||[]).forEach(t=>rows.push([t.code,t.type,t.destination_name,t.destination_address,t.status,t.created_by,brDate(t.created_at),brDate(t.shipped_at),brDate(t.received_at),t.total_quantity,t.total_value,t.carrier,t.tracking_code,t.document_number])); download('transferencias.csv',rows.map(row=>row.map(csvEscape).join(';')).join('\n'),'text/csv;charset=utf-8'); };
-  window.exportTransfersJson = function(){ download('transferencias.json',JSON.stringify({transfers:state.transfers||[], transferItems:state.transferItems||[], warehouses:state.warehouses||[]},null,2),'application/json;charset=utf-8'); };
-  window.exportSkuStockCsvTransfers = function(){ const rows=[['SKU','EAN','Produto','Total fisico','Saldo atual','Disponivel','Reservado','Transferido','Em transito','Baixado','Descartado','Valor saldo']]; aggregateSkuWithTransfers(stockRowsWithTransfers()).forEach(g=>rows.push([g.sku,g.ean,g.product,g.total,g.current,g.available,g.reserved,g.transferred,g.inTransit,g.writtenOff,g.discarded,g.value])); download('estoque-por-sku-saldos.csv',rows.map(row=>row.map(csvEscape).join(';')).join('\n'),'text/csv;charset=utf-8'); };
-
-  const oldResetTransfer = resetApp;
-  window.resetApp = function(){ if(!confirm('Resetar todos os dados locais do protótipo?')) return; localStorage.removeItem(APP_KEY); state=structuredClone(initialState); state.transfers=[]; state.transferItems=[]; state.warehouses=structuredClone(DEFAULT_WAREHOUSES); render(); };
-
-})();
-
-
-  /************************************************************
-   * Upload rápido de evidências - mobile, câmera, compressão e QR futuro
-   ************************************************************/
-  (function(){
-    const QUICK_EVIDENCE_CATEGORIES = ['Produto recebido','Produto avariado','Produto usado','Produto quebrado','Produto divergente','Embalagem','Etiqueta de transporte','XML','Nota fiscal','Vídeo de abertura','Quarentena','Reparo','Reembalagem','Descarte','Transferência','Contestação','Aprovação','Auditoria','Comprovante','Documento interno'];
-    const QUICK_ALLOWED_EXT = ['jpg','jpeg','png','webp','mp4','mov','webm','pdf','xml','csv','xlsx'];
-    const QUICK_MAX_FILES = 20;
-    const QUICK_MAX_SIZE = 20 * 1024 * 1024;
-
-    const quickStyle = document.createElement('style');
-    quickStyle.textContent = `
-      .quick-upload-modal{position:fixed;inset:0;z-index:9999;background:rgba(15,23,42,.58);display:grid;place-items:center;padding:20px}
-      .quick-upload-card{width:min(1120px,100%);max-height:92vh;overflow:auto;background:#fff;border-radius:24px;box-shadow:0 30px 90px rgba(15,23,42,.35);padding:22px}
-      .quick-category-grid{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px}
-      .quick-category-grid button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 11px;font-size:12px;font-weight:850;color:#475467}
-      .quick-category-grid button.active{background:#1d4ed8;color:#fff;border-color:#1d4ed8}
-      .quick-drop{border:2px dashed #bfdbfe;background:#eff6ff;border-radius:18px;padding:18px;text-align:center;transition:.18s ease}
-      .quick-drop.drag{background:#dbeafe;border-color:#2563eb}
-      .quick-preview-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-top:14px}
-      .quick-preview{border:1px solid var(--line);border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 8px 20px rgba(15,23,42,.04)}
-      .quick-preview-media{height:118px;background:#f8fafc;display:grid;place-items:center;color:#1d4ed8;font-weight:900;overflow:hidden}
-      .quick-preview-media img{width:100%;height:100%;object-fit:cover}
-      .quick-preview-body{padding:10px;font-size:12px;color:#475467}
-      .quick-mobile-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-      .quick-context{background:#f8fafc;border:1px solid var(--line);border-radius:14px;padding:12px;color:#475467;font-size:13px}
-      .quick-qr-box{border:1px dashed #93c5fd;background:#eff6ff;border-radius:16px;padding:16px;margin-top:12px}
-      .quick-fab-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-      @media(max-width:720px){.quick-upload-card{padding:16px;border-radius:18px}.quick-preview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.quick-category-grid button{font-size:11px}.quick-mobile-actions .btn{flex:1}}
-    `;
-    document.head.appendChild(quickStyle);
-
-    function ensureQuickEvidenceState(){
-      state.standaloneEvidence = state.standaloneEvidence || [];
-      state.evidenceTokens = state.evidenceTokens || [];
-      state.quickEvidenceSettings = state.quickEvidenceSettings || {maxImageWidth:1600, quality:.76, maxFiles:QUICK_MAX_FILES, maxFileSize:QUICK_MAX_SIZE};
+function startQrPolling(token){
+  if(qrPollingTimer) clearInterval(qrPollingTimer);
+  const tick = async () => {
+    const before = countAllEvidences();
+    const res = await fetchSupabaseEvidences({token, rerender:false});
+    const after = countAllEvidences();
+    const status = document.getElementById('qrStatus');
+    if(status){
+      if(res.error) status.innerHTML = `<span class="sync-pill err">Erro ao consultar: ${esc(res.error)}</span>`;
+      else if(after > before || (res.data||[]).length) status.innerHTML = `<span class="sync-pill ok">Evidência recebida com sucesso. Atualizando tela...</span>`;
+      else status.innerHTML = `<span class="sync-pill">Aguardando envio pelo celular...</span>`;
     }
-    ensureQuickEvidenceState();
-
-    const oldSaveQuickEvidence = save;
-    window.save = function(){
-      ensureQuickEvidenceState();
-      const keep = {standaloneEvidence:state.standaloneEvidence||[], evidenceTokens:state.evidenceTokens||[], quickEvidenceSettings:state.quickEvidenceSettings||null};
-      oldSaveQuickEvidence();
-      try{ const raw = JSON.parse(localStorage.getItem(APP_KEY) || '{}'); Object.assign(raw, keep); localStorage.setItem(APP_KEY, JSON.stringify(raw)); }catch(e){}
-    };
-
-    function quickMimeFromName(name){
-      const n=String(name||'').toLowerCase();
-      if(n.endsWith('.jpg')||n.endsWith('.jpeg')) return 'image/jpeg';
-      if(n.endsWith('.png')) return 'image/png';
-      if(n.endsWith('.webp')) return 'image/webp';
-      if(n.endsWith('.mp4')) return 'video/mp4';
-      if(n.endsWith('.mov')) return 'video/quicktime';
-      if(n.endsWith('.webm')) return 'video/webm';
-      if(n.endsWith('.pdf')) return 'application/pdf';
-      if(n.endsWith('.xml')) return 'application/xml';
-      if(n.endsWith('.csv')) return 'text/csv';
-      if(n.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-      return 'application/octet-stream';
+    if(after > before){
+      setTimeout(()=>render(), 800);
     }
-    function quickExt(name){ return String(name||'').split('.').pop().toLowerCase(); }
-    function isQuickAllowed(file){
-      const ext = quickExt(file.name);
-      return QUICK_ALLOWED_EXT.includes(ext) || /^(image|video)\//.test(file.type||'');
-    }
-    function quickFormatBytes(bytes){ return typeof formatBytes==='function' ? formatBytes(bytes) : `${Math.round((bytes||0)/1024)} KB`; }
-    function quickSanitize(s){ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80) || 'evidencia'; }
-    function quickNowName(){ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}_${String(d.getHours()).padStart(2,'0')}-${String(d.getMinutes()).padStart(2,'0')}-${String(d.getSeconds()).padStart(2,'0')}`; }
-    function quickAutoName(context, category, originalName, mime){
-      const ext = (mime||'').startsWith('image/') ? 'jpg' : (quickExt(originalName)||'dat');
-      const pedido = quickSanitize(context.orderNumber || context.returnCode || context.transferCode || context.context_id || 'SEM-PEDIDO');
-      const sku = quickSanitize(context.sku || context.product || context.destinationName || 'GERAL');
-      const cat = quickSanitize(category || 'EVIDENCIA');
-      return `${pedido}_${sku}_${cat}_${quickNowName()}.${ext}`;
-    }
-    function fileToDataUrl(file){ return new Promise((resolve,reject)=>{ const reader=new FileReader(); reader.onload=()=>resolve(String(reader.result||'')); reader.onerror=reject; reader.readAsDataURL(file); }); }
-    function imageFromDataUrl(dataUrl){ return new Promise((resolve,reject)=>{ const img=new Image(); img.onload=()=>resolve(img); img.onerror=reject; img.src=dataUrl; }); }
-    async function resizeDataUrl(dataUrl, maxWidth, quality, thumbWidth){
-      const img = await imageFromDataUrl(dataUrl);
-      const ratio = Math.min(1, maxWidth / img.width);
-      const w = Math.max(1, Math.round(img.width * ratio));
-      const h = Math.max(1, Math.round(img.height * ratio));
-      const canvas = document.createElement('canvas'); canvas.width=w; canvas.height=h;
-      const ctx = canvas.getContext('2d'); ctx.drawImage(img,0,0,w,h);
-      const main = canvas.toDataURL('image/jpeg', quality);
-      const tr = Math.min(1, thumbWidth / img.width);
-      const tw = Math.max(1, Math.round(img.width * tr));
-      const th = Math.max(1, Math.round(img.height * tr));
-      const tcanvas = document.createElement('canvas'); tcanvas.width=tw; tcanvas.height=th;
-      tcanvas.getContext('2d').drawImage(img,0,0,tw,th);
-      const thumb = tcanvas.toDataURL('image/jpeg', .72);
-      return {dataUrl:main, preview:main, thumbnail:thumb, width:w, height:h, originalWidth:img.width, originalHeight:img.height, compressed:true, finalSize:Math.round((main.length*3)/4)};
-    }
-    async function buildQuickEvidenceFromFile(file, context, category){
-      if(!isQuickAllowed(file)) throw new Error(`Tipo de arquivo não permitido: ${file.name}`);
-      if(!file.size) throw new Error(`Arquivo vazio: ${file.name}`);
-      if(file.size > QUICK_MAX_SIZE) throw new Error(`Arquivo acima de 20 MB: ${file.name}`);
-      const isImg = (file.type||quickMimeFromName(file.name)).startsWith('image/');
-      let dataUrl = await fileToDataUrl(file);
-      let preview = '', thumbnail='', compressed=false, finalSize=file.size, width='', height='';
-      let mime = file.type || quickMimeFromName(file.name);
-      if(isImg){
-        try{
-          const r = await resizeDataUrl(dataUrl, Number(state.quickEvidenceSettings?.maxImageWidth||1600), Number(state.quickEvidenceSettings?.quality||.76), 360);
-          dataUrl=r.dataUrl; preview=r.preview; thumbnail=r.thumbnail; compressed=r.compressed; finalSize=r.finalSize; width=r.width; height=r.height; mime='image/jpeg';
-        }catch(e){ preview=dataUrl; thumbnail=dataUrl; }
-      }
-      const ev = {
-        id:uid('ev'), name:quickAutoName(context, category, file.name, mime), originalName:file.name, type:mime, mime_type:mime,
-        size:finalSize, originalSize:file.size, uploadedBy:state.session?.name||'Usuário', uploadedAt:nowIso(), evidenceType:category || inferEvidenceType(file.name,mime),
-        notes:'', status:'Ativa', dataUrl, preview, thumbnail, compressed, width, height,
-        context_type:context.context_type||context.type||'geral', context_id:context.context_id||context.id||'',
-        returnId:context.returnId||'', itemId:context.itemId||'', returnedStockId:context.returnedStockId||'', transferId:context.transferId||'', movementId:context.movementId||'',
-        returnCode:context.returnCode||'', transferCode:context.transferCode||'', orderNumber:context.orderNumber||'', invoiceNumber:context.invoiceNumber||'', sku:context.sku||'', product:context.product||context.destinationName||'', source:context.source||''
-      };
-      return ev;
-    }
-
-    function quickContextLabel(context){
-      const parts=[];
-      if(context.returnCode) parts.push(`Devolução ${context.returnCode}`);
-      if(context.transferCode) parts.push(`Transferência ${context.transferCode}`);
-      if(context.orderNumber) parts.push(`Pedido ${context.orderNumber}`);
-      if(context.sku) parts.push(`SKU ${context.sku}`);
-      if(context.product) parts.push(context.product);
-      if(context.destinationName) parts.push(context.destinationName);
-      return parts.join(' · ') || 'Evidência geral';
-    }
-    function quickCategoryButtons(selected){ return `<div class="quick-category-grid">${QUICK_EVIDENCE_CATEGORIES.map(c=>`<button type="button" class="${selected===c?'active':''}" onclick="quickSetEvidenceCategory('${c.replace(/'/g,"\\'")}')">${esc(c)}</button>`).join('')}</div>`; }
-    function quickPreviewHtml(){
-      const d=window.__quickEvidenceDraft||{files:[],category:'Produto recebido'};
-      if(!d.files.length) return '<p class="hint">Nenhum arquivo selecionado. Use a câmera, galeria ou arraste arquivos para o quadro acima.</p>';
-      return `<div class="quick-preview-grid">${d.files.map((ev,idx)=>`<div class="quick-preview"><div class="quick-preview-media">${(ev.type||'').startsWith('image/')?`<img src="${ev.thumbnail||ev.preview||ev.dataUrl}" alt="preview">`:fileIcon(ev)}</div><div class="quick-preview-body"><strong title="${esc(ev.originalName||ev.name)}">${esc(ev.originalName||ev.name)}</strong><br><span>${esc(ev.evidenceType)} · ${quickFormatBytes(ev.originalSize||ev.size)} → ${quickFormatBytes(ev.size||0)}</span><br>${ev.compressed?'<span class="badge green">Comprimida</span>':'<span class="badge gray">Original</span>'}<button class="btn danger small" style="width:100%;margin-top:8px" onclick="quickRemoveEvidenceDraftFile('+idx+')">Remover</button></div></div>`).join('')}</div>`;
-    }
-    function redrawQuickEvidenceModal(){
-      const body=document.getElementById('quickEvidenceBody'); if(!body) return;
-      const d=window.__quickEvidenceDraft;
-      body.innerHTML = `
-        <div class="quick-context"><strong>Vínculo:</strong> ${esc(quickContextLabel(d.context))}<br><span class="hint">Os arquivos serão vinculados automaticamente a este contexto e aparecerão na Central de Evidências.</span></div>
-        <label style="margin-top:14px">Categoria rápida</label>${quickCategoryButtons(d.category)}
-        <div id="quickDrop" class="quick-drop">
-          <strong>Arraste arquivos aqui ou selecione abaixo</strong>
-          <p class="hint">Aceita imagens, vídeos, PDF, XML, CSV e XLSX. Imagens serão comprimidas automaticamente.</p>
-          <div class="quick-mobile-actions">
-            <label class="btn primary" style="margin:0"><input id="quickCameraInput" type="file" accept="image/*" capture="environment" style="display:none">Capturar foto</label>
-            <label class="btn" style="margin:0"><input id="quickMultiInput" type="file" multiple accept="image/*,video/*,.pdf,.xml,.csv,.xlsx" style="display:none">Upload múltiplo</label>
-            <button class="btn ghost" type="button" onclick="openEvidenceQrInfo(window.__quickEvidenceDraft.context)">Enviar pelo celular via QR Code</button>
-          </div>
-        </div>
-        <div id="quickPreviewArea">${quickPreviewHtml()}</div>
-        <div class="field" style="margin-top:14px"><label>Observação para todas as evidências</label><textarea id="quickEvidenceNote" placeholder="Ex.: foto da avaria na lateral da embalagem, produto extra recebido fisicamente...">${esc(d.note||'')}</textarea></div>
-      `;
-      const camera=document.getElementById('quickCameraInput'); const multi=document.getElementById('quickMultiInput'); const drop=document.getElementById('quickDrop');
-      camera.onchange=()=>quickHandleEvidenceFiles(camera.files);
-      multi.onchange=()=>quickHandleEvidenceFiles(multi.files);
-      ['dragenter','dragover'].forEach(evt=>drop.addEventListener(evt,e=>{e.preventDefault();drop.classList.add('drag');}));
-      ['dragleave','drop'].forEach(evt=>drop.addEventListener(evt,e=>{e.preventDefault();drop.classList.remove('drag');}));
-      drop.addEventListener('drop',e=>quickHandleEvidenceFiles(e.dataTransfer.files));
-    }
-
-    window.openQuickEvidenceModal = function(context={}, suggestedCategory='Produto recebido'){
-      ensureQuickEvidenceState();
-      window.__quickEvidenceDraft = {context, category:suggestedCategory||'Produto recebido', files:[], note:''};
-      const modal=document.createElement('div'); modal.className='quick-upload-modal'; modal.innerHTML=`<div class="quick-upload-card"><div class="split"><div><h2>Upload rápido de evidências</h2><p>Use câmera do celular, upload múltiplo ou drag-and-drop. Imagens grandes serão comprimidas antes de salvar.</p></div><button class="btn ghost" onclick="this.closest('.quick-upload-modal').remove()">Fechar</button></div><div id="quickEvidenceBody"></div><div class="row-actions" style="margin-top:16px;justify-content:flex-end"><button class="btn ghost" onclick="this.closest('.quick-upload-modal').remove()">Cancelar</button><button id="quickEvidenceSaveBtn" class="btn primary" type="button">Salvar evidências</button></div></div>`;
-      document.body.appendChild(modal); redrawQuickEvidenceModal();
-      const saveBtn = modal.querySelector('#quickEvidenceSaveBtn');
-      if(saveBtn){
-        saveBtn.addEventListener('click', function(ev){
-          ev.preventDefault();
-          if(typeof window.saveQuickEvidenceDraft === 'function') window.saveQuickEvidenceDraft();
-          else alert('Função de salvar evidências não foi carregada. Recarregue o app e tente novamente.');
-        });
-      }
-    };
-    window.quickSetEvidenceCategory = function(category){ const d=window.__quickEvidenceDraft; if(!d) return; d.category=category; d.files.forEach(ev=>ev.evidenceType=category); redrawQuickEvidenceModal(); };
-    window.quickRemoveEvidenceDraftFile = function(idx){ const d=window.__quickEvidenceDraft; if(!d) return; d.files.splice(idx,1); redrawQuickEvidenceModal(); };
-    window.quickHandleEvidenceFiles = async function(fileList){
-      const d=window.__quickEvidenceDraft; if(!d) return;
-      const files=Array.from(fileList||[]);
-      if(!files.length) return;
-      if(d.files.length + files.length > QUICK_MAX_FILES){ alert(`Limite de ${QUICK_MAX_FILES} arquivos por envio.`); return; }
-      const errors=[];
-      for(const file of files){
-        try{
-          const dup=d.files.some(ev=>ev.originalName===file.name && ev.originalSize===file.size);
-          if(dup){ errors.push(`Duplicado ignorado: ${file.name}`); continue; }
-          const ev=await buildQuickEvidenceFromFile(file,d.context,d.category);
-          d.files.push(ev);
-        }catch(err){ errors.push(err.message||String(err)); }
-      }
-      if(errors.length) alert(errors.join('\n'));
-      redrawQuickEvidenceModal();
-    };
-
-    function attachQuickEvidenceToContext(ev, context){
-      ensureQuickEvidenceState();
-      if(context.transferId){
-        const tr=(state.transfers||[]).find(t=>t.id===context.transferId);
-        if(tr){ tr.evidences=tr.evidences||[]; ev.transferCode=tr.code; ev.returnCode=tr.code; ev.product=tr.destination_name; ev.transfer=tr; tr.evidences.push(ev); tr.evidence_ids=tr.evidence_ids||[]; tr.evidence_ids.push(ev.id); tr.audit_history=tr.audit_history||[]; tr.audit_history.unshift({at:nowIso(), user:state.session.name, action:'Evidência anexada via upload rápido', detail:ev.name}); return {entity:'transfer', id:tr.id, detail:tr.code}; }
-      }
-      const returnId=context.returnId; const itemId=context.itemId;
-      if(returnId && itemId){
-        const ret=getReturn(returnId); const item=ret?.items?.find(i=>i.id===itemId);
-        if(ret && item){ item.evidences=item.evidences||[]; ev.returnCode=ret.code; ev.orderNumber=ret.orderNumber||''; ev.invoiceNumber=ret.invoice?.number||''; ev.sku=ev.sku||item.sku; ev.product=ev.product||item.description; item.evidences.push(ev); addReturnAudit(ret,'Evidência anexada via upload rápido',`${ev.name} no SKU ${item.sku}`); return {entity:'return_item', id:item.id, detail:`${ret.code} · ${item.sku}`}; }
-      }
-      if(context.returnId){
-        const ret=getReturn(context.returnId); const item=ret?.items?.[0];
-        if(ret && item){ item.evidences=item.evidences||[]; ev.returnCode=ret.code; ev.orderNumber=ret.orderNumber||''; ev.invoiceNumber=ret.invoice?.number||''; ev.sku=ev.sku||item.sku; ev.product=ev.product||item.description; item.evidences.push(ev); addReturnAudit(ret,'Evidência geral anexada',ev.name); return {entity:'return', id:ret.id, detail:ret.code}; }
-      }
-      if(context.returnedStockId){
-        const [retId, itemId2]=String(context.returnedStockId).split('::');
-        const ret=getReturn(retId); const item=ret?.items?.find(i=>i.id===itemId2);
-        if(ret && item){ item.evidences=item.evidences||[]; ev.returnId=ret.id; ev.itemId=item.id; ev.returnCode=ret.code; ev.orderNumber=ret.orderNumber||''; ev.invoiceNumber=ret.invoice?.number||''; ev.sku=ev.sku||item.sku; ev.product=ev.product||item.description; item.evidences.push(ev); addReturnAudit(ret,'Evidência de estoque anexada',ev.name); return {entity:'stock', id:context.returnedStockId, detail:`${ret.code} · ${item.sku}`}; }
-      }
-      state.standaloneEvidence.push(ev);
-      return {entity:'evidence', id:ev.id, detail:'Evidência geral'};
-    }
-    window.saveQuickEvidenceDraft = function(){
-      const d=window.__quickEvidenceDraft;
-      if(!d || !d.files.length){ alert('Selecione pelo menos um arquivo.'); return; }
-      const btn=document.getElementById('quickEvidenceSaveBtn');
-      const oldLabel=btn ? btn.textContent : '';
-      try{
-        if(btn){ btn.disabled=true; btn.textContent='Salvando...'; }
-        d.note = document.getElementById('quickEvidenceNote')?.value || '';
-        const saved=[];
-        d.files.forEach(ev=>{
-          ev.notes=d.note;
-          const target=attachQuickEvidenceToContext(ev,d.context || {});
-          addAudit('Evidência anexada via upload rápido',target.entity,target.id,`${ev.name} · ${ev.evidenceType} · ${quickFormatBytes(ev.originalSize||ev.size)} → ${quickFormatBytes(ev.size||0)} · compressão ${ev.compressed?'sim':'não'}`);
-          saved.push(ev);
-        });
-        try{
-          if(typeof window.save === 'function') window.save(); else save();
-        }catch(storageErr){
-          console.error(storageErr);
-          alert('As evidências foram preparadas, mas o navegador não conseguiu salvar os dados. Possível limite de armazenamento local. Exporte um backup, remova arquivos muito grandes ou reduza a quantidade de evidências.');
-          return;
-        }
-        document.querySelector('.quick-upload-modal')?.remove();
-        alert(`${saved.length} evidência(s) salva(s).`);
-        if(typeof render === 'function') render();
-      }catch(err){
-        console.error(err);
-        alert('Não foi possível salvar as evidências: ' + (err && err.message ? err.message : String(err)));
-      }finally{
-        if(btn && document.body.contains(btn)){ btn.disabled=false; btn.textContent=oldLabel || 'Salvar evidências'; }
-      }
-    };
-
-    window.generateEvidenceUploadToken = function(context){ const token={token:uid('tok'), context_type:context.context_type||context.type||'return', context_id:context.context_id||context.id||context.returnId||context.itemId||context.transferId||'', expires_at:new Date(Date.now()+1000*60*30).toISOString(), created_by:state.session?.name||'', used_at:null}; state.evidenceTokens=state.evidenceTokens||[]; state.evidenceTokens.unshift(token); save(); return token; };
-    window.generateEvidenceQrCode = function(context){ const token=generateEvidenceUploadToken(context); return {token, url:`/mobile-evidence-upload?token=${encodeURIComponent(token.token)}`}; };
-    window.openEvidenceQrInfo = function(context={}){ const q=generateEvidenceQrCode(context); const modal=document.createElement('div'); modal.className='quick-upload-modal'; modal.innerHTML=`<div class="quick-upload-card" style="max-width:680px"><div class="split"><div><h2>Envio pelo celular via QR Code</h2><p>Preparação para a versão online com banco e storage compartilhado.</p></div><button class="btn ghost" onclick="this.closest('.quick-upload-modal').remove()">Fechar</button></div><div class="quick-qr-box"><strong>Na versão local:</strong><p>O envio por QR Code estará disponível quando o app estiver online com banco de dados e storage compartilhado. Por enquanto, abra o index.html diretamente no celular e use o botão <strong>Capturar foto</strong>.</p><strong>Estrutura futura gerada:</strong><pre style="white-space:pre-wrap;background:#fff;border-radius:12px;padding:12px">${esc(JSON.stringify(q.token,null,2))}</pre><p class="hint">URL futura: ${esc(q.url)}</p></div><div class="card" style="margin-top:12px"><h3>Preview conceitual da tela /mobile-evidence-upload</h3><p><strong>${esc(quickContextLabel(context))}</strong></p><button class="btn primary">Capturar foto</button><button class="btn" style="margin-left:8px">Enviar</button></div></div>`; document.body.appendChild(modal); };
-
-    function contextFromReturn(ret){ return {context_type:'return', returnId:ret.id, context_id:ret.id, returnCode:ret.code, orderNumber:ret.orderNumber||'', invoiceNumber:ret.invoice?.number||'', product:'Devolução'}; }
-    function contextFromItem(ret,item){ return {context_type:'item', returnId:ret.id, itemId:item.id, context_id:item.id, returnCode:ret.code, orderNumber:ret.orderNumber||'', invoiceNumber:ret.invoice?.number||'', sku:item.sku, product:item.description}; }
-    function contextFromStockRow(r){ return {context_type:'stock', returnedStockId:r.stockKey||`${r.ret.id}::${r.item.id}`, returnId:r.ret.id, itemId:r.item.id, context_id:r.stockKey||`${r.ret.id}::${r.item.id}`, returnCode:r.ret.code, orderNumber:r.ret.orderNumber||'', invoiceNumber:r.ret.invoice?.number||'', sku:r.sku, product:r.product}; }
-    function contextFromTransfer(tr){ return {context_type:'transfer', transferId:tr.id, context_id:tr.id, transferCode:tr.code, destinationName:tr.destination_name, product:tr.destination_name}; }
-
-    const previousAllEvidenceQuick = window.allEvidence || allEvidence;
-    window.allEvidence = function(){
-      const list=[];
-      try{ (previousAllEvidenceQuick()||[]).forEach(e=>list.push(e)); }catch(e){}
-      (state.standaloneEvidence||[]).forEach(ev=>list.push(ev));
-      const seen=new Set(); return list.filter(ev=>{ if(!ev || !ev.id || seen.has(ev.id)) return false; seen.add(ev.id); return true; });
-    };
-
-    const oldHandleEvidenceUploadQuick = window.handleEvidenceUpload || handleEvidenceUpload;
-    window.handleEvidenceUpload = async function(input, retId, itemId){
-      const ret=getReturn(retId); const item=ret?.items?.find(i=>i.id===itemId);
-      const files=Array.from(input.files||[]); if(!ret || !item || !files.length) return;
-      window.__quickEvidenceDraft={context:contextFromItem(ret,item), category:guessEvidenceType(item)||'Produto recebido', files:[], note:''};
-      await quickHandleEvidenceFiles(files);
-      saveQuickEvidenceDraft();
-      input.value='';
-    };
-
-    const oldTransferEvidenceQuick = window.handleTransferEvidenceUpload;
-    window.handleTransferEvidenceUpload = async function(input, transferId){
-      const tr=(state.transfers||[]).find(t=>t.id===transferId); const files=Array.from(input.files||[]); if(!tr||!files.length) return;
-      window.__quickEvidenceDraft={context:contextFromTransfer(tr), category:String(tr.type||'').toLowerCase().includes('descarte')?'Descarte':'Transferência', files:[], note:''};
-      await quickHandleEvidenceFiles(files);
-      saveQuickEvidenceDraft(); input.value='';
-    };
-
-    const oldRenderNewReturnQuick = renderNewReturn;
-    window.renderNewReturn = function(){
-      let html=oldRenderNewReturnQuick();
-      if(!state.currentReturnId){
-        html=html.replace('<button class="btn primary" type="submit">Criar e validar devolução</button>', '<div class="row-actions"><button class="btn primary" type="submit">Criar e validar devolução</button><button class="btn" type="button" onclick="openQuickEvidenceModal({context_type:\'pre_return\', source:\'nova_devolucao\'},\'Produto recebido\')">Adicionar evidência</button><button class="btn ghost" type="button" onclick="openEvidenceQrInfo({context_type:\'pre_return\', source:\'nova_devolucao\'})">Enviar pelo celular</button></div>');
-      }
-      return html;
-    };
-
-    const oldRenderInspectionItemQuick = window.renderInspectionItem || renderInspectionItem;
-    window.renderInspectionItem = function(ret,item){
-      let html=oldRenderInspectionItemQuick(ret,item);
-      const ctx = `openQuickEvidenceModal({context_type:'item',returnId:'${ret.id}',itemId:'${item.id}',context_id:'${item.id}',returnCode:'${(ret.code||'').replace(/'/g,"\\'")}',orderNumber:'${(ret.orderNumber||'').replace(/'/g,"\\'")}',invoiceNumber:'${(ret.invoice?.number||'').replace(/'/g,"\\'")}',sku:'${(item.sku||'').replace(/'/g,"\\'")}',product:'${(item.description||'').replace(/'/g,"\\'")}'},`;
-      const quickButtons = `<div class="quick-fab-row" style="margin:8px 0 10px"><button class="btn small primary" type="button" onclick="${ctx}'Produto recebido')">Foto do produto</button><button class="btn small" type="button" onclick="${ctx}'Embalagem')">Foto da embalagem</button><button class="btn small warning" type="button" onclick="${ctx}'Produto avariado')">Foto da avaria</button><button class="btn small" type="button" onclick="${ctx}'Etiqueta de transporte')">Foto da etiqueta</button><button class="btn small ghost" type="button" onclick="${ctx}'Vídeo de abertura')">Vídeo de abertura</button><button class="btn small ghost" type="button" onclick="openEvidenceQrInfo({context_type:'item',returnId:'${ret.id}',itemId:'${item.id}',context_id:'${item.id}',sku:'${(item.sku||'').replace(/'/g,"\\'")}',product:'${(item.description||'').replace(/'/g,"\\'")}'})">Enviar pelo celular</button></div>`;
-      html=html.replace('<label>Evidências</label>', '<label>Evidências</label>'+quickButtons);
-      return html;
-    };
-
-    if(typeof renderDestinationItem === 'function'){
-      const oldRenderDestinationItemQuick = renderDestinationItem;
-      window.renderDestinationItem = function(ret,item){
-        let html=oldRenderDestinationItemQuick(ret,item);
-        const btn=`<div class="row-actions" style="margin-top:10px"><button class="btn small" onclick="openQuickEvidenceModal({context_type:'item',returnId:'${ret.id}',itemId:'${item.id}',context_id:'${item.id}',returnCode:'${(ret.code||'').replace(/'/g,"\\'")}',orderNumber:'${(ret.orderNumber||'').replace(/'/g,"\\'")}',invoiceNumber:'${(ret.invoice?.number||'').replace(/'/g,"\\'")}',sku:'${(item.sku||'').replace(/'/g,"\\'")}',product:'${(item.description||'').replace(/'/g,"\\'")}'},'${['Descarte','Contestação'].includes(item.destination)?item.destination:'Aprovação'}')">Adicionar evidência do destino</button></div>`;
-        return html.replace('</div>\n  `;', '</div>\n  `;')===html ? html.replace('</div>\n    </div>', btn+'</div>\n    </div>') : html;
-      };
-    }
-
-    const oldRenderEvidenceCenterQuick = window.renderEvidenceCenter || renderEvidenceCenter;
-    window.renderEvidenceCenter = function(){
-      let html=oldRenderEvidenceCenterQuick();
-      html=html.replace('<button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button>', '<button class="btn primary" onclick="openQuickEvidenceModal({context_type:\'central\',source:\'central_evidencias\'},\'Documento interno\')">Upload rápido</button><button class="btn ghost" onclick="openEvidenceQrInfo({context_type:\'central\',source:\'central_evidencias\'})">QR Code futuro</button><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button>');
-      return html;
-    };
-
-    if(window.renderReturnedStock){
-      const oldRenderReturnedStockQuick = window.renderReturnedStock;
-      window.renderReturnedStock = function(){
-        let html=oldRenderReturnedStockQuick();
-        html=html.replace('<button class="btn" onclick="nav(\'evidencias\')">Central de Evidências</button>', '<button class="btn" onclick="nav(\'evidencias\')">Central de Evidências</button><button class="btn primary" onclick="openQuickEvidenceModal({context_type:\'stock\',source:\'estoque_devolvido\'},\'Produto recebido\')">Upload evidência</button>');
-        html=html.replace(/<button class="btn small" onclick="openReturn\('([^']+)'\)">Abrir<\/button>/g, (m,retId)=>`${m}<button class="btn small" onclick="{const r=getReturn('${retId}'); const it=r?.items?.[0]; if(it) openQuickEvidenceModal({context_type:'item',returnId:r.id,itemId:it.id,context_id:it.id,returnCode:r.code,orderNumber:r.orderNumber||'',invoiceNumber:r.invoice?.number||'',sku:it.sku,product:it.description},'Produto recebido')}">Evidência</button>`);
-        return html;
-      };
-    }
-
-    if(window.renderTransfersPanel){
-      const oldRenderTransfersPanelQuick = window.renderTransfersPanel;
-      window.renderTransfersPanel = function(){
-        let html=oldRenderTransfersPanelQuick();
-        html=html.replace('<button class="btn" onclick="exportTransfersCsv()">Exportar CSV</button>', '<button class="btn primary" onclick="openQuickEvidenceModal({context_type:\'transfer\',source:\'transferencias\'},\'Transferência\')">Upload evidência</button><button class="btn" onclick="exportTransfersCsv()">Exportar CSV</button>');
-        return html;
-      };
-    }
-
-    if(window.openTransferDetail){
-      const oldOpenTransferDetailQuick = window.openTransferDetail;
-      window.openTransferDetail = function(id){
-        oldOpenTransferDetailQuick(id);
-        const tr=(state.transfers||[]).find(t=>t.id===id); const modal=document.querySelector('.sku-modal .modal-card');
-        if(tr && modal){
-          const boxes=modal.querySelectorAll('.card h2');
-          boxes.forEach(h=>{ if(h.textContent.includes('Evidências da transferência')){ const parent=h.closest('.card'); const div=document.createElement('div'); div.className='row-actions'; div.style.margin='8px 0 10px'; div.innerHTML=`<button class="btn primary small" onclick="openQuickEvidenceModal({context_type:'transfer',transferId:'${tr.id}',context_id:'${tr.id}',transferCode:'${tr.code}',destinationName:'${(tr.destination_name||'').replace(/'/g,"\\'")}'},'${String(tr.type||'').toLowerCase().includes('descarte')?'Descarte':'Transferência'}')">Anexar evidência da transferência</button><button class="btn ghost small" onclick="openEvidenceQrInfo({context_type:'transfer',transferId:'${tr.id}',context_id:'${tr.id}',transferCode:'${tr.code}'})">Enviar pelo celular</button>`; parent.insertBefore(div, h.nextSibling); } });
-        }
-      };
-    }
-
-    const oldFinalizeQuickEvidence = window.finalizeReturn || finalizeReturn;
-    window.finalizeReturn = function(retId){
-      const ret=getReturn(retId);
-      if(ret){
-        const missing=[];
-        (ret.items||[]).forEach(item=>{
-          normalizeQtyFields(item);
-          const critical = Number(item.quantity_difference||0)!==0 || ['Descarte','Contestação'].includes(item.destination) || /avaria|quebrado|divergente|usado|sem embalagem/i.test([item.conferenceStatus,item.physicalCondition,item.packageCondition].join(' '));
-          if(critical && !(item.evidences||[]).filter(e=>e.status!=='Excluída').length) missing.push(item.sku||item.description);
-        });
-        if(missing.length){ alert(`Esta ação exige pelo menos uma evidência anexada.\nItens: ${missing.join(', ')}`); return; }
-      }
-      return oldFinalizeQuickEvidence(retId);
-    };
-
-    if(window.confirmTransferShipment){
-      const oldConfirmTransferShipmentQuick = window.confirmTransferShipment;
-      window.confirmTransferShipment = function(id){
-        const tr=(state.transfers||[]).find(t=>t.id===id);
-        if(tr && /descarte|perda/i.test(tr.type||'') && !(tr.evidences||[]).filter(e=>e.status!=='Excluída').length){ alert('Esta ação exige pelo menos uma evidência anexada para descarte/perda operacional.'); return; }
-        return oldConfirmTransferShipmentQuick(id);
-      };
-    }
-
-    const oldExportEvidenceCsvQuick = window.exportEvidenceCsv;
-    window.exportEvidenceCsv = function(){
-      const rows=[['ID','Arquivo','Original','Tipo','Status','Origem','Contexto','Código','Pedido','Documento','SKU','Produto/Destino','Usuario','Data','Tamanho original','Tamanho final','Comprimida','Observacao']];
-      (allEvidence()||[]).forEach(ev=>rows.push([ev.id,ev.name,ev.originalName||'',ev.evidenceType||evidenceGroup(ev),ev.status||'Ativa',ev.transferId?'Transferência':ev.returnId?'Devolução':ev.context_type||'',ev.context_type||'',ev.returnCode||ev.transferCode||'',ev.orderNumber||'',ev.invoiceNumber||'',ev.sku||'',ev.product||'',ev.uploadedBy||'',brDate(ev.uploadedAt),ev.originalSize||ev.size||0,ev.size||0,ev.compressed?'Sim':'Não',ev.notes||'']));
-      download('central-evidencias.csv',rows.map(row=>row.map(csvEscape).join(';')).join('\n'),'text/csv;charset=utf-8');
-    };
-
-  })();
-
-
-/* ==========================================================
- * Atualização: exclusão controlada + QR Code real de evidências
- * Cloudflare Pages + Supabase Storage/PostgreSQL
- * ========================================================== */
-(function(){
-  const SB_URL = 'https://wiehiqiuojcwcrnikiqs.supabase.co';
-  const SB_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZWhpcWl1b2pjd2NybmlraXFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjMyMTMsImV4cCI6MjA5NDMzOTIxM30.BFdyC9R39D8KkMTUe6_MAxjuvs8igNhj9FT87d1Ilj8';
-  const APP_STATE_ID = 'decolab-main';
-  let sbClient = null;
-  let remoteSaveTimer = null;
-  let qrPollTimer = null;
-
-  function getSupabase(){
-    if(sbClient) return sbClient;
-    if(!window.supabase || !window.supabase.createClient) return null;
-    sbClient = window.supabase.createClient(SB_URL, SB_ANON_KEY);
-    return sbClient;
-  }
-
-  function ensureDeletionQrState(){
-    state.deletedReturns = state.deletedReturns || [];
-    state.qrUploadTokens = state.qrUploadTokens || [];
-    state.remoteEvidenceImported = state.remoteEvidenceImported || {};
-    state.supabaseStatus = state.supabaseStatus || {mode:'online-ready', lastSyncAt:'', lastError:''};
-    state.filters = state.filters || {};
-  }
-
-  function compactStateForRemote(){
-    ensureDeletionQrState();
-    return {
-      users: state.users,
-      session: state.session,
-      route: state.route,
-      currentReturnId: state.currentReturnId,
-      returns: state.returns,
-      audit: state.audit,
-      rules: state.rules,
-      filters: state.filters,
-      stockView: state.stockView,
-      correctionDrafts: state.correctionDrafts,
-      mediaFilters: state.mediaFilters,
-      transfers: state.transfers || [],
-      transferItems: state.transferItems || [],
-      warehouses: state.warehouses || [],
-      transferTab: state.transferTab || 'transferencias',
-      standaloneEvidence: state.standaloneEvidence || [],
-      evidenceTokens: state.evidenceTokens || [],
-      quickEvidenceSettings: state.quickEvidenceSettings || null,
-      deletedReturns: state.deletedReturns || [],
-      qrUploadTokens: state.qrUploadTokens || [],
-      remoteEvidenceImported: state.remoteEvidenceImported || {},
-      supabaseStatus: state.supabaseStatus || {}
-    };
-  }
-
-  async function pushAppStateToSupabase(){
-    const sb = getSupabase();
-    if(!sb) return;
-    try{
-      ensureDeletionQrState();
-      const payload = compactStateForRemote();
-      const {error} = await sb.from('app_state').upsert({id: APP_STATE_ID, data: payload, updated_at: new Date().toISOString()});
-      if(error) throw error;
-      state.supabaseStatus.lastSyncAt = nowIso();
-      state.supabaseStatus.lastError = '';
-    }catch(err){
-      state.supabaseStatus = state.supabaseStatus || {};
-      state.supabaseStatus.lastError = err.message || String(err);
-      console.warn('Falha ao sincronizar Supabase:', err);
-    }
-  }
-
-  function scheduleRemoteSave(){
-    clearTimeout(remoteSaveTimer);
-    remoteSaveTimer = setTimeout(pushAppStateToSupabase, 1200);
-  }
-
-  const previousSaveDeletionQr = window.save || save;
-  window.save = function(){
-    ensureDeletionQrState();
-    previousSaveDeletionQr();
-    try{
-      const raw = JSON.parse(localStorage.getItem(APP_KEY) || '{}');
-      Object.assign(raw, compactStateForRemote());
-      localStorage.setItem(APP_KEY, JSON.stringify(raw));
-    }catch(e){ console.warn('Falha ao persistir local completo:', e); }
-    scheduleRemoteSave();
   };
+  tick();
+  qrPollingTimer = setInterval(tick, 5000);
+}
 
-  window.testSupabaseConnection = async function(){
-    const sb=getSupabase();
-    if(!sb){ alert('Biblioteca Supabase não carregada. Verifique conexão com internet.'); return; }
-    try{
-      const {error} = await sb.from('app_state').select('id').eq('id', APP_STATE_ID).limit(1);
-      if(error) throw error;
-      alert('Conexão Supabase OK.');
-    }catch(err){ alert('Erro Supabase: '+(err.message||String(err))); }
-  };
+function closeQrModal(){
+  if(qrPollingTimer){ clearInterval(qrPollingTimer); qrPollingTimer = null; }
+  closeModal();
+  fetchSupabaseEvidences({rerender:true});
+}
 
-  window.pushLocalToSupabase = async function(){
-    await pushAppStateToSupabase();
-    alert(state.supabaseStatus?.lastError ? 'Erro: '+state.supabaseStatus.lastError : 'Base local enviada ao Supabase.');
-  };
+function countAllEvidences(){
+  return state.returns.reduce((s,r)=>s+(r.items||[]).reduce((a,i)=>a+(i.evidences||[]).length,0),0);
+}
 
-  window.loadFromSupabase = async function(){
-    const sb=getSupabase(); if(!sb){ alert('Supabase não carregado.'); return; }
-    try{
-      const {data,error} = await sb.from('app_state').select('data').eq('id',APP_STATE_ID).single();
-      if(error) throw error;
-      if(data?.data){ Object.assign(state, data.data, {pendingInvoice:null, pendingXmlText:'', modal:null}); save(); render(); alert('Base carregada do Supabase.'); }
-    }catch(err){ alert('Erro ao carregar Supabase: '+(err.message||String(err))); }
-  };
+function copyText(text){
+  navigator.clipboard?.writeText(text).then(()=>alert('Link copiado.')).catch(()=>prompt('Copie o link:', text));
+}
 
-  function currentRole(){ return state.session?.role || ''; }
-  function canSoftDeleteReturn(){ return ['Administrador','Supervisor'].includes(currentRole()) || hasPerm?.('all'); }
-  function canHardDeleteReturn(){ return currentRole()==='Administrador' || hasPerm?.('all'); }
-  function activeReturns(){ return (state.returns||[]).filter(r=>!r.is_deleted); }
-  function deletedReturns(){ return (state.returns||[]).filter(r=>r.is_deleted); }
-
-  const originalFilteredReturnsDel = window.filteredReturns || filteredReturns;
-  window.filteredReturns = function(){
-    const q = (state.filters.returnSearch || '').toLowerCase().trim();
-    const showDeleted = state.filters.showDeletedReturns === true;
-    let list = showDeleted ? deletedReturns() : activeReturns();
-    if(q){
-      list = list.filter(r => [
-        r.code, r.orderNumber, r.marketplace, r.customerName, r.trackingCode,
-        r.invoice?.accessKey, r.invoice?.number, r.deletion_reason,
-        ...(r.items || []).map(i => [i.sku,i.ean,i.description,i.physical_sku,i.physical_product_name].join(' '))
-      ].join(' ').toLowerCase().includes(q));
-    }
-    return list;
-  };
-  try{ filteredReturns = window.filteredReturns; }catch(e){}
-
-  function relatedEvidenceCount(ret){ return (ret.items||[]).reduce((s,i)=>s+(i.evidences||[]).filter(e=>e.status!=='Excluída').length,0); }
-  function relatedTransferCount(ret){ return (state.transfers||[]).filter(t=>(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)).length; }
-  function hasSentTransfer(ret){ return (state.transfers||[]).some(t=>(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id) && ['Enviada','Em trânsito','Recebida','Parcialmente recebida','Finalizada'].includes(t.status)); }
-
-  window.renderReturns = function(){
-    const list = filteredReturns();
-    const showDeleted = !!state.filters.showDeletedReturns;
-    return `<div class="card"><div class="split"><div><h2>${showDeleted?'Devoluções excluídas':'Lista de devoluções'}</h2><p>${showDeleted?'Histórico de exclusões lógicas com opção de restauração.':'Filtre por pedido, cliente, SKU, NF-e ou marketplace.'}</p></div><div class="row-actions"><button class="btn ${showDeleted?'primary':''}" onclick="state.filters.showDeletedReturns=!state.filters.showDeletedReturns; save(); render()">${showDeleted?'Ver ativas':'Devoluções excluídas'}</button><button class="btn" onclick="exportReturnsCsv()">Exportar CSV</button><button class="btn primary" onclick="nav('nova')">Nova devolução</button></div></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Código</th><th>Pedido / Cliente</th><th>Marketplace</th><th>NF-e</th><th>Itens</th><th>Status</th><th>Ação</th></tr></thead><tbody>${list.map(r=>`<tr><td><strong>${esc(r.code)}</strong><br><span class="hint">${brDate(r.createdAt)}</span>${r.is_deleted?`<br><span class="badge red">Excluída</span>`:''}</td><td>${esc(r.orderNumber||'-')}<br><span class="hint">${esc(r.customerName||'-')}</span></td><td>${esc(r.marketplace||'-')}</td><td>${esc(r.invoice?.number||'-')}<br><span class="hint">${esc(r.invoice?.accessKey||'-')}</span></td><td>${r.items?.length||0}</td><td>${statusBadge(r.status)}</td><td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button>${r.is_deleted?`<button class="btn small primary" onclick="restoreReturn('${r.id}')">Restaurar</button>`:`${canSoftDeleteReturn()?`<button class="btn danger small" onclick="openDeleteReturnModal('${r.id}')">Excluir</button>`:''}<button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button>`}</div></td></tr>`).join('')}</tbody></table></div>`:empty(showDeleted?'Nenhuma devolução excluída.':'Nenhuma devolução encontrada.')}</div>`;
-  };
-  try{ renderReturns = window.renderReturns; }catch(e){}
-
-  const oldOpenReturnDel = window.openReturn || openReturn;
-  window.openReturn = function(id){ oldOpenReturnDel(id); setTimeout(injectReturnActionButtons, 0); };
-  try{ openReturn = window.openReturn; }catch(e){}
-
-  const oldRenderAppDel = window.render || render;
-  window.render = function(){ oldRenderAppDel(); setTimeout(injectReturnActionButtons,0); };
-  try{ render = window.render; }catch(e){}
-
-  function injectReturnActionButtons(){
-    if(state.route!=='nova' || !state.currentReturnId) return;
-    const ret=getReturn(state.currentReturnId); if(!ret) return;
-    const targets=[...document.querySelectorAll('.row-actions')];
-    const top=targets.find(el=>el.textContent.includes('Voltar')) || targets[0];
-    if(!top || top.querySelector('[data-del-return]')) return;
-    const wrap=document.createElement('span'); wrap.setAttribute('data-del-return','1');
-    wrap.innerHTML = `${canSoftDeleteReturn()?`<button class="btn danger" onclick="openDeleteReturnModal('${ret.id}')">Excluir devolução</button>`:''}<button class="btn ghost" onclick="openQrEvidenceModal({context_type:'return',returnId:'${ret.id}',context_id:'${ret.id}',returnCode:'${(ret.code||'').replace(/'/g,"\\'")}',orderNumber:'${(ret.orderNumber||'').replace(/'/g,"\\'")}',invoiceNumber:'${(ret.invoice?.number||'').replace(/'/g,"\\'")}',category:'Produto recebido'})">Enviar pelo celular via QR Code</button>`;
-    top.appendChild(wrap);
-  }
-
-  window.openDeleteReturnModal = function(retId){
-    const ret=getReturn(retId); if(!ret) return;
-    const sent=hasSentTransfer(ret);
-    const transferCount=relatedTransferCount(ret);
-    const evCount=relatedEvidenceCount(ret);
-    const modal=document.createElement('div'); modal.className='sku-modal';
-    modal.innerHTML=`<div class="modal-card" style="max-width:860px"><div class="split"><div><h2>Excluir devolução ${esc(ret.code)}</h2><p>Use exclusão lógica como padrão. A exclusão definitiva é restrita e irreversível.</p></div><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><section class="grid cols-4" style="margin:14px 0">${metricCard('Itens',ret.items?.length||0,'Vinculados','▥')}${metricCard('Evidências',evCount,'Serão preservadas por padrão','▧')}${metricCard('Transferências',transferCount,sent?'Há transferência enviada':'Vinculadas','⇄')}${metricCard('Estoque',ret.items?.reduce((s,i)=>s+Number(i.physical_received_quantity||i.receivedQty||0),0)||0,'Qtd física','SKU')}</section><div class="form-grid two"><div class="field"><label>Tipo de exclusão</label><select id="del_type" onchange="document.getElementById('del_confirm_box').style.display=this.value==='definitiva'?'block':'none'"><option value="logica">Exclusão lógica recomendada</option>${canHardDeleteReturn()?`<option value="definitiva" ${sent?'disabled':''}>Exclusão definitiva</option>`:''}</select>${sent?'<span class="hint">Exclusão definitiva bloqueada: há transferência enviada/recebida/finalizada.</span>':''}</div><div class="field"><label>Motivo obrigatório</label><select id="del_reason"><option value="">Selecione</option><option>Cadastro duplicado</option><option>Erro operacional</option><option>Nota incorreta</option><option>Teste / lançamento indevido</option><option>Outro</option></select></div></div><div class="field"><label>Observação</label><textarea id="del_notes" placeholder="Descreva o motivo e o impacto operacional"></textarea></div><div class="grid cols-2"><label><input id="del_remove_stock" type="checkbox" checked> remover estoque relacionado das visões ativas</label><label><input id="del_cancel_transfers" type="checkbox" checked> cancelar transferências pendentes</label><label><input id="del_keep_evidence" type="checkbox" checked> manter evidências</label><label><input id="del_remove_reports" type="checkbox" checked> remover dos relatórios operacionais</label></div><div id="del_confirm_box" class="field" style="display:none;margin-top:12px"><label>Digite CONFIRMAR EXCLUSÃO</label><input id="del_confirm" placeholder="CONFIRMAR EXCLUSÃO"></div><div class="row-actions" style="justify-content:flex-end;margin-top:18px"><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Cancelar</button><button class="btn danger" onclick="executeDeleteReturn('${ret.id}')">Confirmar exclusão</button></div></div>`;
-    document.body.appendChild(modal);
-  };
-
-  window.executeDeleteReturn = function(retId){
-    const ret=getReturn(retId); if(!ret) return;
-    const type=document.getElementById('del_type')?.value||'logica';
-    const reason=document.getElementById('del_reason')?.value||'';
-    const notes=document.getElementById('del_notes')?.value||'';
-    if(!reason){ alert('Informe o motivo da exclusão.'); return; }
-    if(type==='definitiva'){
-      if(!canHardDeleteReturn()){ alert('Apenas administrador pode fazer exclusão definitiva.'); return; }
-      if(hasSentTransfer(ret)){ alert('Exclusão definitiva bloqueada porque há transferência enviada, recebida ou finalizada. Use exclusão lógica.'); return; }
-      if((document.getElementById('del_confirm')?.value||'')!=='CONFIRMAR EXCLUSÃO'){ alert('Digite CONFIRMAR EXCLUSÃO para continuar.'); return; }
-    }
-    ensureDeletionQrState();
-    const impact={items:ret.items?.length||0,evidences:relatedEvidenceCount(ret),transfers:relatedTransferCount(ret),physicalQty:(ret.items||[]).reduce((s,i)=>s+Number(i.physical_received_quantity||i.receivedQty||0),0)};
-    const log={id:uid('del'), return_id:ret.id, return_code:ret.code, type, reason, notes, impact, deleted_by:state.session?.name||'Sistema', deleted_at:nowIso()};
-    state.deletedReturns.unshift(log);
-    if(type==='logica'){
-      ret.is_deleted=true; ret.deleted_at=log.deleted_at; ret.deleted_by=log.deleted_by; ret.deletion_reason=reason; ret.deletion_notes=notes; ret.status='Excluída';
-      if(document.getElementById('del_cancel_transfers')?.checked){
-        (state.transfers||[]).forEach(t=>{ if(['Rascunho','Pendente de envio'].includes(t.status) && (t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)){ t.status='Cancelada'; t.notes=(t.notes||'')+' | Cancelada por exclusão da devolução '+ret.code; }});
-      }
-      addAudit('Exclusão lógica de devolução','return',ret.id,`${ret.code} · ${reason} · impacto ${JSON.stringify(impact)}`);
-    } else {
-      state.returns = (state.returns||[]).filter(r=>r.id!==ret.id);
-      if(document.getElementById('del_cancel_transfers')?.checked){ state.transfers=(state.transfers||[]).filter(t=>!(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)); }
-      addAudit('Exclusão definitiva de devolução','return',ret.id,`${ret.code} · ${reason} · impacto ${JSON.stringify(impact)}`);
-    }
-    save(); document.querySelector('.sku-modal')?.remove(); state.currentReturnId=null; state.route='devolucoes'; render();
-  };
-
-  window.restoreReturn = function(retId){
-    const ret=getReturn(retId); if(!ret) return;
-    if(!canHardDeleteReturn()){ alert('Apenas administrador pode restaurar devolução excluída.'); return; }
-    if(!confirm(`Restaurar ${ret.code}?`)) return;
-    ret.is_deleted=false; ret.deleted_at=''; ret.deleted_by=''; ret.deletion_reason=''; ret.deletion_notes=''; ret.status='Finalizado';
-    addAudit('Restauração de devolução excluída','return',ret.id,ret.code);
-    save(); render();
-  };
-
-  // QR Code real de evidência
-  function randomToken(){
-    const bytes=new Uint8Array(24); crypto.getRandomValues(bytes);
-    return Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
-  }
-  function contextMeta(context){
-    const ret = context.returnId ? getReturn(context.returnId) : null;
-    let item = ret && context.itemId ? (ret.items||[]).find(i=>i.id===context.itemId) : (ret?.items?.[0] || null);
-    const tr = context.transferId ? (state.transfers||[]).find(t=>t.id===context.transferId) : null;
-    return {
-      returnCode: context.returnCode || ret?.code || '',
-      orderNumber: context.orderNumber || ret?.orderNumber || '',
-      invoiceNumber: context.invoiceNumber || ret?.invoice?.number || '',
-      sku: context.sku || item?.sku || item?.physical_sku || '',
-      product: context.product || item?.description || item?.physical_product_name || tr?.destination_name || '',
-      transferCode: context.transferCode || tr?.code || '',
-      category: context.category || context.evidenceType || (tr && /descarte/i.test(tr.type||'')?'Descarte':'Produto recebido')
-    };
-  }
-  async function createRemoteQrToken(context){
-    const token=randomToken(); const meta=contextMeta(context); const expires=new Date(Date.now()+15*60*1000).toISOString();
-    const record={ id:uid('qrt'), token, context_type:context.context_type||'return', context_id:context.context_id||context.returnId||context.itemId||context.transferId||'', return_id:context.returnId||null, return_item_id:context.itemId||null, returned_stock_id:context.returnedStockId||null, transfer_id:context.transferId||null, movement_id:context.movementId||null, category:meta.category, created_by:state.session?.name||'Sistema', created_at:nowIso(), expires_at:expires, used_at:null, status:'active', max_uploads:20, upload_count:0, metadata_json:{...meta, appUrl: location.origin+location.pathname.replace(/index\.html$/,'')} };
-    ensureDeletionQrState(); state.qrUploadTokens.unshift(record); save();
-    const sb=getSupabase();
-    if(sb){
-      const {error}=await sb.from('qr_upload_tokens').insert(record);
-      if(error) throw error;
-    }
-    return record;
-  }
-  function mobileUploadUrl(token){
-    const base = location.href.replace(/index\.html.*$/,'').replace(/#.*$/,'').replace(/\?.*$/,'');
-    return base + 'mobile-upload.html?token=' + encodeURIComponent(token);
-  }
-  window.openQrEvidenceModal = async function(context={}){
-    const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card" style="max-width:720px"><div class="split"><div><h2>Enviar evidência via QR Code</h2><p>Escaneie com o celular para anexar a foto diretamente ao contexto correto.</p></div><button class="btn ghost" onclick="closeQrModal(this)">Fechar</button></div><div id="qrStatusBox" class="card"><p>Gerando token temporário...</p></div></div>`; document.body.appendChild(modal);
-    try{
-      const rec=await createRemoteQrToken(context); const url=mobileUploadUrl(rec.token); const meta=rec.metadata_json||{};
-      const box=document.getElementById('qrStatusBox');
-      const safeUrl = esc(url);
-      const copyUrl = url.replace(/'/g, "\\'");
-      const qrFallback = 'https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=10&data=' + encodeURIComponent(url);
-      box.innerHTML=`<div class="grid cols-2"><div><div id="qrVisualBox" style="width:280px;max-width:100%;background:#fff;border-radius:16px;padding:12px;display:grid;place-items:center;min-height:280px"><img id="qrFallbackImg" src="${qrFallback}" alt="QR Code" style="width:260px;max-width:100%;height:auto"></div><p class="hint" style="word-break:break-all;margin-top:8px">Link: <span>${safeUrl}</span></p><div class="row-actions" style="margin-top:10px"><button class="btn" onclick="navigator.clipboard.writeText('${copyUrl}'); alert('Link copiado')">Copiar link</button><a class="btn primary" href="${safeUrl}" target="_blank">Abrir upload</a></div></div><div><h3>Contexto</h3><p><strong>${esc(meta.returnCode||meta.transferCode||'Evidência')}</strong></p><p>Pedido: ${esc(meta.orderNumber||'-')}<br>SKU: ${esc(meta.sku||'-')}<br>Produto: ${esc(meta.product||'-')}<br>Categoria: ${esc(meta.category||'-')}</p><p class="hint">Validade: 15 minutos<br>Status: <span id="qrLiveStatus">Aguardando envio pelo celular...</span></p><div id="qrReceivedList"></div></div></div>`;
-      try{
-        if(window.QRCode && QRCode.toCanvas){
-          const canvas=document.createElement('canvas');
-          QRCode.toCanvas(canvas, url, {width:260, margin:1}, function(err){
-            if(!err){ const qbox=document.getElementById('qrVisualBox'); if(qbox){ qbox.innerHTML=''; qbox.appendChild(canvas); } }
-          });
-        }
-      }catch(qrErr){ console.warn('Falha ao renderizar QR local, usando fallback por imagem.', qrErr); }
-      startQrEvidencePolling(rec.token);
-      addAudit('QR Code de evidência criado','qr_upload_token',rec.id,`${rec.context_type} · ${meta.returnCode||meta.transferCode||''}`);
-    }catch(err){ document.getElementById('qrStatusBox').innerHTML=`<div class="alert critica"><strong>Erro</strong><div>${esc(err.message||String(err))}</div></div>`; }
-  };
-  window.closeQrModal = function(btn){ clearInterval(qrPollTimer); btn.closest('.sku-modal')?.remove(); };
-  const oldQrInfo = window.openEvidenceQrInfo;
-  window.openEvidenceQrInfo = function(context={}){ return openQrEvidenceModal(context); };
-
-  function startQrEvidencePolling(token){
-    clearInterval(qrPollTimer);
-    const tick=async()=>{
-      const count=await importRemoteEvidenceForToken(token);
-      const status=document.getElementById('qrLiveStatus');
-      if(status && count>0) status.textContent=`${count} evidência(s) recebida(s) com sucesso.`;
-      const list=document.getElementById('qrReceivedList');
-      if(list && count>0) list.innerHTML=`<div class="alert boa"><strong>Recebido</strong><div>${count} arquivo(s) anexado(s). A Central de Evidências já foi atualizada.</div></div>`;
-    };
-    tick(); qrPollTimer=setInterval(tick,5000);
-  }
-
-  async function importRemoteEvidenceForToken(token){
-    const sb=getSupabase(); if(!sb) return 0;
-    try{
-      const {data,error}=await sb.from('evidence_files').select('*').eq('upload_token',token).order('created_at',{ascending:false});
-      if(error) throw error;
-      let imported=0;
-      for(const row of data||[]){
-        if(state.remoteEvidenceImported[row.id]) continue;
-        const ev={ id:row.id, name:row.file_name||row.original_name||'evidencia', originalName:row.original_name||row.file_name||'', type:row.mime_type||'', size:row.file_size||0, uploadedBy:row.uploaded_by||'Celular / QR Code', uploadedAt:row.created_at||nowIso(), returnId:row.return_id||'', itemId:row.return_item_id||'', transferId:row.transfer_id||'', evidenceType:row.category||row.evidence_type||'Produto recebido', notes:row.notes||'', status:'Ativa', dataUrl:row.file_url||row.public_url||'', preview:row.thumbnail_url||row.file_url||row.public_url||'', thumbnail:row.thumbnail_url||row.file_url||row.public_url||'', file_url:row.file_url||row.public_url||'', storage_path:row.storage_path||'', uploaded_from:row.uploaded_from||'mobile_qr', upload_token:token };
-        attachQuickEvidenceToContext(ev,{returnId:row.return_id, itemId:row.return_item_id, transferId:row.transfer_id, returnedStockId:row.returned_stock_id, context_type:row.context_type||''});
-        state.remoteEvidenceImported[row.id]=true; imported++;
-        addAudit('Evidência recebida via QR Code','evidence',row.id,ev.name);
-      }
-      if(imported){ save(); render(); }
-      return (data||[]).length;
-    }catch(err){ console.warn('Erro polling QR:',err); return 0; }
-  }
-  window.importRemoteEvidenceForToken = importRemoteEvidenceForToken;
-
-  // Melhorar download de evidências remotas.
-  const oldDownloadEvidenceQr = window.downloadEvidence;
-  window.downloadEvidence = function(id){
-    const ev=(allEvidence()||[]).find(e=>e.id===id);
-    if(ev && ev.file_url && !ev.dataUrl){ window.open(ev.file_url,'_blank'); return; }
-    return oldDownloadEvidenceQr ? oldDownloadEvidenceQr(id) : null;
-  };
-
-  // Botões de QR em áreas já existentes.
-  const oldRenderEvidenceCenterQr = window.renderEvidenceCenter;
-  window.renderEvidenceCenter = function(){
-    let html=oldRenderEvidenceCenterQr();
-    return html.replace('Upload rápido</button>', 'Upload rápido</button><button class="btn ghost" onclick="openQrEvidenceModal({context_type:\'central\',context_id:\'central\',category:\'Documento interno\'})">QR Code real</button>');
-  };
-
-  // Painel simples de status online injetado em Configurações.
-  const oldRenderSettingsQr = window.renderSettings || renderSettings;
-  window.renderSettings = function(){
-    let html=oldRenderSettingsQr();
-    const box=`<div class="card" style="margin-top:18px"><div class="split"><div><h2>Online / Supabase</h2><p>Status da conexão, sincronização e base compartilhada.</p></div><div class="row-actions"><button class="btn" onclick="testSupabaseConnection()">Testar conexão</button><button class="btn primary" onclick="pushLocalToSupabase()">Enviar base local</button><button class="btn" onclick="loadFromSupabase()">Carregar base Supabase</button></div></div><p class="hint">Última sincronização: ${esc(state.supabaseStatus?.lastSyncAt||'-')}<br>Último erro: ${esc(state.supabaseStatus?.lastError||'-')}</p></div>`;
-    return html + box;
-  };
-  try{ renderSettings = window.renderSettings; }catch(e){}
-
-  ensureDeletionQrState();
-  save();
-})();
+// Compatibilidade com modais existentes
+if(typeof closeModal !== 'function'){
+  function closeModal(){ const m=document.getElementById('modal'); if(m) m.remove(); }
+}
 
 render();
+initSupabaseEvidenceSync();
 </script>
 </body>
 </html>
