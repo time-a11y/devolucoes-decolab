@@ -247,11 +247,13 @@
       .print-only{display:block}
     }
   </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 </head>
 <body>
 <div id="app"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const APP_KEY = 'devolucoes_nfe_app_v1';
 
@@ -3261,232 +3263,326 @@ function downloadReturnCsv(retId){
   })();
 
 
-  /* === MODO ONLINE SUPABASE - Cloudflare Pages + Supabase Free === */
-  (function(){
-    const SUPABASE_DEFAULT_URL = 'https://wiehiqiuojcwcrnikiqs.supabase.co';
-    const SUPABASE_DEFAULT_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZWhpcWl1b2pjd2NybmlraXFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjMyMTMsImV4cCI6MjA5NDMzOTIxM30.BFdyC9R39D8KkMTUe6_MAxjuvs8igNhj9FT87d1Ilj8';
-    let supabaseClient = null;
-    let onlineSaveTimer = null;
-    let onlineIsSaving = false;
+/* ==========================================================
+ * Atualização: exclusão controlada + QR Code real de evidências
+ * Cloudflare Pages + Supabase Storage/PostgreSQL
+ * ========================================================== */
+(function(){
+  const SB_URL = 'https://wiehiqiuojcwcrnikiqs.supabase.co';
+  const SB_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZWhpcWl1b2pjd2NybmlraXFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjMyMTMsImV4cCI6MjA5NDMzOTIxM30.BFdyC9R39D8KkMTUe6_MAxjuvs8igNhj9FT87d1Ilj8';
+  const APP_STATE_ID = 'decolab-main';
+  let sbClient = null;
+  let remoteSaveTimer = null;
+  let qrPollTimer = null;
 
-    function ensureSupabaseConfig(){
-      state.supabase = state.supabase || {
-        enabled: true,
-        url: SUPABASE_DEFAULT_URL,
-        anonKey: SUPABASE_DEFAULT_ANON_KEY,
-        bucket: 'evidencias',
-        stateId: 'decolab-main',
-        lastSyncAt: '',
-        lastError: '',
-        mode: 'hybrid'
-      };
-      state.supabase.url = (state.supabase.url || SUPABASE_DEFAULT_URL).replace(/\/rest\/v1\/?$/,'');
-      state.supabase.anonKey = state.supabase.anonKey || SUPABASE_DEFAULT_ANON_KEY;
-      state.supabase.bucket = state.supabase.bucket || 'evidencias';
-      state.supabase.stateId = state.supabase.stateId || 'decolab-main';
-      if(typeof state.supabase.enabled === 'undefined') state.supabase.enabled = true;
-    }
+  function getSupabase(){
+    if(sbClient) return sbClient;
+    if(!window.supabase || !window.supabase.createClient) return null;
+    sbClient = window.supabase.createClient(SB_URL, SB_ANON_KEY);
+    return sbClient;
+  }
 
-    function getSupabase(){
-      ensureSupabaseConfig();
-      if(!state.supabase.enabled) return null;
-      if(!window.supabase){ state.supabase.lastError = 'Biblioteca Supabase não carregada.'; return null; }
-      if(!supabaseClient || supabaseClient.__url !== state.supabase.url){
-        supabaseClient = window.supabase.createClient(state.supabase.url, state.supabase.anonKey);
-        supabaseClient.__url = state.supabase.url;
-      }
-      return supabaseClient;
-    }
+  function ensureDeletionQrState(){
+    state.deletedReturns = state.deletedReturns || [];
+    state.qrUploadTokens = state.qrUploadTokens || [];
+    state.remoteEvidenceImported = state.remoteEvidenceImported || {};
+    state.supabaseStatus = state.supabaseStatus || {mode:'online-ready', lastSyncAt:'', lastError:''};
+    state.filters = state.filters || {};
+  }
 
-    function supabaseStatusBadge(){
-      ensureSupabaseConfig();
-      if(!state.supabase.enabled) return '<span class="badge gray">Offline local</span>';
-      if(state.supabase.lastError) return '<span class="badge red">Supabase com erro</span>';
-      return '<span class="badge green">Supabase ativo</span>';
-    }
+  function compactStateForRemote(){
+    ensureDeletionQrState();
+    return {
+      users: state.users,
+      session: state.session,
+      route: state.route,
+      currentReturnId: state.currentReturnId,
+      returns: state.returns,
+      audit: state.audit,
+      rules: state.rules,
+      filters: state.filters,
+      stockView: state.stockView,
+      correctionDrafts: state.correctionDrafts,
+      mediaFilters: state.mediaFilters,
+      transfers: state.transfers || [],
+      transferItems: state.transferItems || [],
+      warehouses: state.warehouses || [],
+      transferTab: state.transferTab || 'transferencias',
+      standaloneEvidence: state.standaloneEvidence || [],
+      evidenceTokens: state.evidenceTokens || [],
+      quickEvidenceSettings: state.quickEvidenceSettings || null,
+      deletedReturns: state.deletedReturns || [],
+      qrUploadTokens: state.qrUploadTokens || [],
+      remoteEvidenceImported: state.remoteEvidenceImported || {},
+      supabaseStatus: state.supabaseStatus || {}
+    };
+  }
 
-    function dataUrlToBlob(dataUrl){
-      return fetch(dataUrl).then(r => r.blob());
-    }
-
-    function safeFileName(name){
-      return String(name||'evidencia').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,120) || 'evidencia';
-    }
-
-    async function uploadEvidenceToSupabase(ev){
-      const sb = getSupabase();
-      if(!sb || !ev || ev.storageUrl || !ev.dataUrl || String(ev.dataUrl).startsWith('http')){
-        if(ev && ev.dataUrl && String(ev.dataUrl).startsWith('http')) ev.storageUrl = ev.dataUrl;
-        return ev;
-      }
-      if(!String(ev.dataUrl).startsWith('data:')) return ev;
-      const blob = await dataUrlToBlob(ev.dataUrl);
-      const folder = ev.transferId ? `transfers/${ev.transferId}` : ev.returnId ? `returns/${ev.returnId}` : 'general';
-      const path = `${folder}/${ev.id}-${safeFileName(ev.name || ev.originalName || 'evidencia')}`;
-      const { error } = await sb.storage.from(state.supabase.bucket).upload(path, blob, { upsert:true, contentType: ev.type || blob.type || 'application/octet-stream' });
+  async function pushAppStateToSupabase(){
+    const sb = getSupabase();
+    if(!sb) return;
+    try{
+      ensureDeletionQrState();
+      const payload = compactStateForRemote();
+      const {error} = await sb.from('app_state').upsert({id: APP_STATE_ID, data: payload, updated_at: new Date().toISOString()});
       if(error) throw error;
-      const { data } = sb.storage.from(state.supabase.bucket).getPublicUrl(path);
-      ev.storageProvider = 'supabase';
-      ev.storagePath = path;
-      ev.storageUrl = data.publicUrl;
-      ev.dataUrl = ev.storageUrl;
-      if(ev.preview) ev.preview = ev.storageUrl;
-      if(ev.thumbnail) ev.thumbnail = ev.storageUrl;
-      ev.syncedAt = nowIso();
-      return ev;
+      state.supabaseStatus.lastSyncAt = nowIso();
+      state.supabaseStatus.lastError = '';
+    }catch(err){
+      state.supabaseStatus = state.supabaseStatus || {};
+      state.supabaseStatus.lastError = err.message || String(err);
+      console.warn('Falha ao sincronizar Supabase:', err);
     }
+  }
 
-    async function uploadAllEvidenceToSupabase(){
-      const evs = typeof allEvidenceCombined === 'function' ? allEvidenceCombined() : (typeof allEvidence === 'function' ? allEvidence() : []);
-      let ok = 0;
-      for(const ev of evs){
-        try{ await uploadEvidenceToSupabase(ev); ok++; }catch(e){ console.warn('Falha upload evidência', ev?.name, e); state.supabase.lastError = `Falha ao enviar evidência ${ev?.name || ''}: ${e.message || e}`; }
+  function scheduleRemoteSave(){
+    clearTimeout(remoteSaveTimer);
+    remoteSaveTimer = setTimeout(pushAppStateToSupabase, 1200);
+  }
+
+  const previousSaveDeletionQr = window.save || save;
+  window.save = function(){
+    ensureDeletionQrState();
+    previousSaveDeletionQr();
+    try{
+      const raw = JSON.parse(localStorage.getItem(APP_KEY) || '{}');
+      Object.assign(raw, compactStateForRemote());
+      localStorage.setItem(APP_KEY, JSON.stringify(raw));
+    }catch(e){ console.warn('Falha ao persistir local completo:', e); }
+    scheduleRemoteSave();
+  };
+
+  window.testSupabaseConnection = async function(){
+    const sb=getSupabase();
+    if(!sb){ alert('Biblioteca Supabase não carregada. Verifique conexão com internet.'); return; }
+    try{
+      const {error} = await sb.from('app_state').select('id').eq('id', APP_STATE_ID).limit(1);
+      if(error) throw error;
+      alert('Conexão Supabase OK.');
+    }catch(err){ alert('Erro Supabase: '+(err.message||String(err))); }
+  };
+
+  window.pushLocalToSupabase = async function(){
+    await pushAppStateToSupabase();
+    alert(state.supabaseStatus?.lastError ? 'Erro: '+state.supabaseStatus.lastError : 'Base local enviada ao Supabase.');
+  };
+
+  window.loadFromSupabase = async function(){
+    const sb=getSupabase(); if(!sb){ alert('Supabase não carregado.'); return; }
+    try{
+      const {data,error} = await sb.from('app_state').select('data').eq('id',APP_STATE_ID).single();
+      if(error) throw error;
+      if(data?.data){ Object.assign(state, data.data, {pendingInvoice:null, pendingXmlText:'', modal:null}); save(); render(); alert('Base carregada do Supabase.'); }
+    }catch(err){ alert('Erro ao carregar Supabase: '+(err.message||String(err))); }
+  };
+
+  function currentRole(){ return state.session?.role || ''; }
+  function canSoftDeleteReturn(){ return ['Administrador','Supervisor'].includes(currentRole()) || hasPerm?.('all'); }
+  function canHardDeleteReturn(){ return currentRole()==='Administrador' || hasPerm?.('all'); }
+  function activeReturns(){ return (state.returns||[]).filter(r=>!r.is_deleted); }
+  function deletedReturns(){ return (state.returns||[]).filter(r=>r.is_deleted); }
+
+  const originalFilteredReturnsDel = window.filteredReturns || filteredReturns;
+  window.filteredReturns = function(){
+    const q = (state.filters.returnSearch || '').toLowerCase().trim();
+    const showDeleted = state.filters.showDeletedReturns === true;
+    let list = showDeleted ? deletedReturns() : activeReturns();
+    if(q){
+      list = list.filter(r => [
+        r.code, r.orderNumber, r.marketplace, r.customerName, r.trackingCode,
+        r.invoice?.accessKey, r.invoice?.number, r.deletion_reason,
+        ...(r.items || []).map(i => [i.sku,i.ean,i.description,i.physical_sku,i.physical_product_name].join(' '))
+      ].join(' ').toLowerCase().includes(q));
+    }
+    return list;
+  };
+  try{ filteredReturns = window.filteredReturns; }catch(e){}
+
+  function relatedEvidenceCount(ret){ return (ret.items||[]).reduce((s,i)=>s+(i.evidences||[]).filter(e=>e.status!=='Excluída').length,0); }
+  function relatedTransferCount(ret){ return (state.transfers||[]).filter(t=>(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)).length; }
+  function hasSentTransfer(ret){ return (state.transfers||[]).some(t=>(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id) && ['Enviada','Em trânsito','Recebida','Parcialmente recebida','Finalizada'].includes(t.status)); }
+
+  window.renderReturns = function(){
+    const list = filteredReturns();
+    const showDeleted = !!state.filters.showDeletedReturns;
+    return `<div class="card"><div class="split"><div><h2>${showDeleted?'Devoluções excluídas':'Lista de devoluções'}</h2><p>${showDeleted?'Histórico de exclusões lógicas com opção de restauração.':'Filtre por pedido, cliente, SKU, NF-e ou marketplace.'}</p></div><div class="row-actions"><button class="btn ${showDeleted?'primary':''}" onclick="state.filters.showDeletedReturns=!state.filters.showDeletedReturns; save(); render()">${showDeleted?'Ver ativas':'Devoluções excluídas'}</button><button class="btn" onclick="exportReturnsCsv()">Exportar CSV</button><button class="btn primary" onclick="nav('nova')">Nova devolução</button></div></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Código</th><th>Pedido / Cliente</th><th>Marketplace</th><th>NF-e</th><th>Itens</th><th>Status</th><th>Ação</th></tr></thead><tbody>${list.map(r=>`<tr><td><strong>${esc(r.code)}</strong><br><span class="hint">${brDate(r.createdAt)}</span>${r.is_deleted?`<br><span class="badge red">Excluída</span>`:''}</td><td>${esc(r.orderNumber||'-')}<br><span class="hint">${esc(r.customerName||'-')}</span></td><td>${esc(r.marketplace||'-')}</td><td>${esc(r.invoice?.number||'-')}<br><span class="hint">${esc(r.invoice?.accessKey||'-')}</span></td><td>${r.items?.length||0}</td><td>${statusBadge(r.status)}</td><td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button>${r.is_deleted?`<button class="btn small primary" onclick="restoreReturn('${r.id}')">Restaurar</button>`:`${canSoftDeleteReturn()?`<button class="btn danger small" onclick="openDeleteReturnModal('${r.id}')">Excluir</button>`:''}<button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button>`}</div></td></tr>`).join('')}</tbody></table></div>`:empty(showDeleted?'Nenhuma devolução excluída.':'Nenhuma devolução encontrada.')}</div>`;
+  };
+  try{ renderReturns = window.renderReturns; }catch(e){}
+
+  const oldOpenReturnDel = window.openReturn || openReturn;
+  window.openReturn = function(id){ oldOpenReturnDel(id); setTimeout(injectReturnActionButtons, 0); };
+  try{ openReturn = window.openReturn; }catch(e){}
+
+  const oldRenderAppDel = window.render || render;
+  window.render = function(){ oldRenderAppDel(); setTimeout(injectReturnActionButtons,0); };
+  try{ render = window.render; }catch(e){}
+
+  function injectReturnActionButtons(){
+    if(state.route!=='nova' || !state.currentReturnId) return;
+    const ret=getReturn(state.currentReturnId); if(!ret) return;
+    const targets=[...document.querySelectorAll('.row-actions')];
+    const top=targets.find(el=>el.textContent.includes('Voltar')) || targets[0];
+    if(!top || top.querySelector('[data-del-return]')) return;
+    const wrap=document.createElement('span'); wrap.setAttribute('data-del-return','1');
+    wrap.innerHTML = `${canSoftDeleteReturn()?`<button class="btn danger" onclick="openDeleteReturnModal('${ret.id}')">Excluir devolução</button>`:''}<button class="btn ghost" onclick="openQrEvidenceModal({context_type:'return',returnId:'${ret.id}',context_id:'${ret.id}',returnCode:'${(ret.code||'').replace(/'/g,"\\'")}',orderNumber:'${(ret.orderNumber||'').replace(/'/g,"\\'")}',invoiceNumber:'${(ret.invoice?.number||'').replace(/'/g,"\\'")}',category:'Produto recebido'})">Enviar pelo celular via QR Code</button>`;
+    top.appendChild(wrap);
+  }
+
+  window.openDeleteReturnModal = function(retId){
+    const ret=getReturn(retId); if(!ret) return;
+    const sent=hasSentTransfer(ret);
+    const transferCount=relatedTransferCount(ret);
+    const evCount=relatedEvidenceCount(ret);
+    const modal=document.createElement('div'); modal.className='sku-modal';
+    modal.innerHTML=`<div class="modal-card" style="max-width:860px"><div class="split"><div><h2>Excluir devolução ${esc(ret.code)}</h2><p>Use exclusão lógica como padrão. A exclusão definitiva é restrita e irreversível.</p></div><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Fechar</button></div><section class="grid cols-4" style="margin:14px 0">${metricCard('Itens',ret.items?.length||0,'Vinculados','▥')}${metricCard('Evidências',evCount,'Serão preservadas por padrão','▧')}${metricCard('Transferências',transferCount,sent?'Há transferência enviada':'Vinculadas','⇄')}${metricCard('Estoque',ret.items?.reduce((s,i)=>s+Number(i.physical_received_quantity||i.receivedQty||0),0)||0,'Qtd física','SKU')}</section><div class="form-grid two"><div class="field"><label>Tipo de exclusão</label><select id="del_type" onchange="document.getElementById('del_confirm_box').style.display=this.value==='definitiva'?'block':'none'"><option value="logica">Exclusão lógica recomendada</option>${canHardDeleteReturn()?`<option value="definitiva" ${sent?'disabled':''}>Exclusão definitiva</option>`:''}</select>${sent?'<span class="hint">Exclusão definitiva bloqueada: há transferência enviada/recebida/finalizada.</span>':''}</div><div class="field"><label>Motivo obrigatório</label><select id="del_reason"><option value="">Selecione</option><option>Cadastro duplicado</option><option>Erro operacional</option><option>Nota incorreta</option><option>Teste / lançamento indevido</option><option>Outro</option></select></div></div><div class="field"><label>Observação</label><textarea id="del_notes" placeholder="Descreva o motivo e o impacto operacional"></textarea></div><div class="grid cols-2"><label><input id="del_remove_stock" type="checkbox" checked> remover estoque relacionado das visões ativas</label><label><input id="del_cancel_transfers" type="checkbox" checked> cancelar transferências pendentes</label><label><input id="del_keep_evidence" type="checkbox" checked> manter evidências</label><label><input id="del_remove_reports" type="checkbox" checked> remover dos relatórios operacionais</label></div><div id="del_confirm_box" class="field" style="display:none;margin-top:12px"><label>Digite CONFIRMAR EXCLUSÃO</label><input id="del_confirm" placeholder="CONFIRMAR EXCLUSÃO"></div><div class="row-actions" style="justify-content:flex-end;margin-top:18px"><button class="btn ghost" onclick="this.closest('.sku-modal').remove()">Cancelar</button><button class="btn danger" onclick="executeDeleteReturn('${ret.id}')">Confirmar exclusão</button></div></div>`;
+    document.body.appendChild(modal);
+  };
+
+  window.executeDeleteReturn = function(retId){
+    const ret=getReturn(retId); if(!ret) return;
+    const type=document.getElementById('del_type')?.value||'logica';
+    const reason=document.getElementById('del_reason')?.value||'';
+    const notes=document.getElementById('del_notes')?.value||'';
+    if(!reason){ alert('Informe o motivo da exclusão.'); return; }
+    if(type==='definitiva'){
+      if(!canHardDeleteReturn()){ alert('Apenas administrador pode fazer exclusão definitiva.'); return; }
+      if(hasSentTransfer(ret)){ alert('Exclusão definitiva bloqueada porque há transferência enviada, recebida ou finalizada. Use exclusão lógica.'); return; }
+      if((document.getElementById('del_confirm')?.value||'')!=='CONFIRMAR EXCLUSÃO'){ alert('Digite CONFIRMAR EXCLUSÃO para continuar.'); return; }
+    }
+    ensureDeletionQrState();
+    const impact={items:ret.items?.length||0,evidences:relatedEvidenceCount(ret),transfers:relatedTransferCount(ret),physicalQty:(ret.items||[]).reduce((s,i)=>s+Number(i.physical_received_quantity||i.receivedQty||0),0)};
+    const log={id:uid('del'), return_id:ret.id, return_code:ret.code, type, reason, notes, impact, deleted_by:state.session?.name||'Sistema', deleted_at:nowIso()};
+    state.deletedReturns.unshift(log);
+    if(type==='logica'){
+      ret.is_deleted=true; ret.deleted_at=log.deleted_at; ret.deleted_by=log.deleted_by; ret.deletion_reason=reason; ret.deletion_notes=notes; ret.status='Excluída';
+      if(document.getElementById('del_cancel_transfers')?.checked){
+        (state.transfers||[]).forEach(t=>{ if(['Rascunho','Pendente de envio'].includes(t.status) && (t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)){ t.status='Cancelada'; t.notes=(t.notes||'')+' | Cancelada por exclusão da devolução '+ret.code; }});
       }
-      return ok;
+      addAudit('Exclusão lógica de devolução','return',ret.id,`${ret.code} · ${reason} · impacto ${JSON.stringify(impact)}`);
+    } else {
+      state.returns = (state.returns||[]).filter(r=>r.id!==ret.id);
+      if(document.getElementById('del_cancel_transfers')?.checked){ state.transfers=(state.transfers||[]).filter(t=>!(t.items||[]).some(it=>it.return_id===ret.id || it.returnId===ret.id)); }
+      addAudit('Exclusão definitiva de devolução','return',ret.id,`${ret.code} · ${reason} · impacto ${JSON.stringify(impact)}`);
     }
+    save(); document.querySelector('.sku-modal')?.remove(); state.currentReturnId=null; state.route='devolucoes'; render();
+  };
 
-    function serializeStateForSupabase(){
-      ensureSupabaseConfig();
-      const cloned = structuredClone(state);
-      cloned.session = null;
-      cloned.route = 'dashboard';
-      cloned.pendingInvoice = null;
-      cloned.pendingXmlText = '';
-      return cloned;
+  window.restoreReturn = function(retId){
+    const ret=getReturn(retId); if(!ret) return;
+    if(!canHardDeleteReturn()){ alert('Apenas administrador pode restaurar devolução excluída.'); return; }
+    if(!confirm(`Restaurar ${ret.code}?`)) return;
+    ret.is_deleted=false; ret.deleted_at=''; ret.deleted_by=''; ret.deletion_reason=''; ret.deletion_notes=''; ret.status='Finalizado';
+    addAudit('Restauração de devolução excluída','return',ret.id,ret.code);
+    save(); render();
+  };
+
+  // QR Code real de evidência
+  function randomToken(){
+    const bytes=new Uint8Array(24); crypto.getRandomValues(bytes);
+    return Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  function contextMeta(context){
+    const ret = context.returnId ? getReturn(context.returnId) : null;
+    let item = ret && context.itemId ? (ret.items||[]).find(i=>i.id===context.itemId) : (ret?.items?.[0] || null);
+    const tr = context.transferId ? (state.transfers||[]).find(t=>t.id===context.transferId) : null;
+    return {
+      returnCode: context.returnCode || ret?.code || '',
+      orderNumber: context.orderNumber || ret?.orderNumber || '',
+      invoiceNumber: context.invoiceNumber || ret?.invoice?.number || '',
+      sku: context.sku || item?.sku || item?.physical_sku || '',
+      product: context.product || item?.description || item?.physical_product_name || tr?.destination_name || '',
+      transferCode: context.transferCode || tr?.code || '',
+      category: context.category || context.evidenceType || (tr && /descarte/i.test(tr.type||'')?'Descarte':'Produto recebido')
+    };
+  }
+  async function createRemoteQrToken(context){
+    const token=randomToken(); const meta=contextMeta(context); const expires=new Date(Date.now()+15*60*1000).toISOString();
+    const record={ id:uid('qrt'), token, context_type:context.context_type||'return', context_id:context.context_id||context.returnId||context.itemId||context.transferId||'', return_id:context.returnId||null, return_item_id:context.itemId||null, returned_stock_id:context.returnedStockId||null, transfer_id:context.transferId||null, movement_id:context.movementId||null, category:meta.category, created_by:state.session?.name||'Sistema', created_at:nowIso(), expires_at:expires, used_at:null, status:'active', max_uploads:20, upload_count:0, metadata_json:{...meta, appUrl: location.origin+location.pathname.replace(/index\.html$/,'')} };
+    ensureDeletionQrState(); state.qrUploadTokens.unshift(record); save();
+    const sb=getSupabase();
+    if(sb){
+      const {error}=await sb.from('qr_upload_tokens').insert(record);
+      if(error) throw error;
     }
+    return record;
+  }
+  function mobileUploadUrl(token){
+    const base = location.href.replace(/index\.html.*$/,'').replace(/#.*$/,'').replace(/\?.*$/,'');
+    return base + 'mobile-upload.html?token=' + encodeURIComponent(token);
+  }
+  window.openQrEvidenceModal = async function(context={}){
+    const modal=document.createElement('div'); modal.className='sku-modal'; modal.innerHTML=`<div class="modal-card" style="max-width:720px"><div class="split"><div><h2>Enviar evidência via QR Code</h2><p>Escaneie com o celular para anexar a foto diretamente ao contexto correto.</p></div><button class="btn ghost" onclick="closeQrModal(this)">Fechar</button></div><div id="qrStatusBox" class="card"><p>Gerando token temporário...</p></div></div>`; document.body.appendChild(modal);
+    try{
+      const rec=await createRemoteQrToken(context); const url=mobileUploadUrl(rec.token); const meta=rec.metadata_json||{};
+      const box=document.getElementById('qrStatusBox');
+      box.innerHTML=`<div class="grid cols-2"><div><canvas id="qrCanvas" style="width:280px;max-width:100%;background:#fff;border-radius:16px;padding:12px"></canvas><div class="row-actions" style="margin-top:10px"><button class="btn" onclick="navigator.clipboard.writeText('${url.replace(/'/g,"\\'")}'); alert('Link copiado')">Copiar link</button><a class="btn primary" href="${esc(url)}" target="_blank">Abrir upload</a></div></div><div><h3>Contexto</h3><p><strong>${esc(meta.returnCode||meta.transferCode||'Evidência')}</strong></p><p>Pedido: ${esc(meta.orderNumber||'-')}<br>SKU: ${esc(meta.sku||'-')}<br>Produto: ${esc(meta.product||'-')}<br>Categoria: ${esc(meta.category||'-')}</p><p class="hint">Validade: 15 minutos<br>Status: <span id="qrLiveStatus">Aguardando envio pelo celular...</span></p><div id="qrReceivedList"></div></div></div>`;
+      if(window.QRCode && QRCode.toCanvas){ QRCode.toCanvas(document.getElementById('qrCanvas'), url, {width:280, margin:1}); }
+      startQrEvidencePolling(rec.token);
+      addAudit('QR Code de evidência criado','qr_upload_token',rec.id,`${rec.context_type} · ${meta.returnCode||meta.transferCode||''}`);
+    }catch(err){ document.getElementById('qrStatusBox').innerHTML=`<div class="alert critica"><strong>Erro</strong><div>${esc(err.message||String(err))}</div></div>`; }
+  };
+  window.closeQrModal = function(btn){ clearInterval(qrPollTimer); btn.closest('.sku-modal')?.remove(); };
+  const oldQrInfo = window.openEvidenceQrInfo;
+  window.openEvidenceQrInfo = function(context={}){ return openQrEvidenceModal(context); };
 
-    async function saveStateToSupabase(manual=false){
-      const sb = getSupabase();
-      if(!sb || onlineIsSaving) return;
-      onlineIsSaving = true;
-      try{
-        await uploadAllEvidenceToSupabase();
-        const payload = serializeStateForSupabase();
-        const { error } = await sb.from('app_state').upsert({ id: state.supabase.stateId, data: payload, updated_at: new Date().toISOString() });
-        if(error) throw error;
-        state.supabase.lastSyncAt = nowIso();
-        state.supabase.lastError = '';
-        localStorage.setItem(APP_KEY, JSON.stringify({...JSON.parse(localStorage.getItem(APP_KEY)||'{}'), supabase: state.supabase}));
-        if(manual) alert('Dados enviados para o Supabase com sucesso.');
-      }catch(e){
-        console.error(e);
-        state.supabase.lastError = e.message || String(e);
-        if(manual) alert('Erro ao enviar para Supabase: ' + state.supabase.lastError + '\n\nConfira se você executou o SQL de criação das tabelas e bucket.');
-      }finally{ onlineIsSaving = false; }
-    }
+  function startQrEvidencePolling(token){
+    clearInterval(qrPollTimer);
+    const tick=async()=>{
+      const count=await importRemoteEvidenceForToken(token);
+      const status=document.getElementById('qrLiveStatus');
+      if(status && count>0) status.textContent=`${count} evidência(s) recebida(s) com sucesso.`;
+      const list=document.getElementById('qrReceivedList');
+      if(list && count>0) list.innerHTML=`<div class="alert boa"><strong>Recebido</strong><div>${count} arquivo(s) anexado(s). A Central de Evidências já foi atualizada.</div></div>`;
+    };
+    tick(); qrPollTimer=setInterval(tick,5000);
+  }
 
-    function scheduleSupabaseSave(){
-      ensureSupabaseConfig();
-      if(!state.supabase.enabled) return;
-      clearTimeout(onlineSaveTimer);
-      onlineSaveTimer = setTimeout(() => saveStateToSupabase(false), 1200);
-    }
-
-    async function loadStateFromSupabase(){
-      const sb = getSupabase();
-      if(!sb) return alert('Supabase não está ativo.');
-      try{
-        const { data, error } = await sb.from('app_state').select('data,updated_at').eq('id', state.supabase.stateId).maybeSingle();
-        if(error) throw error;
-        if(!data || !data.data) return alert('Ainda não existe estado salvo no Supabase. Use “Enviar base local para Supabase”.');
-        const keepSession = state.session;
-        const keepRoute = state.route;
-        const cfg = state.supabase;
-        state = {...structuredClone(initialState), ...data.data, session: keepSession, route: keepRoute, pendingInvoice:null, pendingXmlText:''};
-        state.supabase = cfg;
-        state.supabase.lastSyncAt = nowIso();
-        state.supabase.lastError = '';
-        localStorage.setItem(APP_KEY, JSON.stringify(state));
-        alert('Base carregada do Supabase.');
-        render();
-      }catch(e){
-        console.error(e);
-        state.supabase.lastError = e.message || String(e);
-        alert('Erro ao carregar Supabase: ' + state.supabase.lastError);
+  async function importRemoteEvidenceForToken(token){
+    const sb=getSupabase(); if(!sb) return 0;
+    try{
+      const {data,error}=await sb.from('evidence_files').select('*').eq('upload_token',token).order('created_at',{ascending:false});
+      if(error) throw error;
+      let imported=0;
+      for(const row of data||[]){
+        if(state.remoteEvidenceImported[row.id]) continue;
+        const ev={ id:row.id, name:row.file_name||row.original_name||'evidencia', originalName:row.original_name||row.file_name||'', type:row.mime_type||'', size:row.file_size||0, uploadedBy:row.uploaded_by||'Celular / QR Code', uploadedAt:row.created_at||nowIso(), returnId:row.return_id||'', itemId:row.return_item_id||'', transferId:row.transfer_id||'', evidenceType:row.category||row.evidence_type||'Produto recebido', notes:row.notes||'', status:'Ativa', dataUrl:row.file_url||row.public_url||'', preview:row.thumbnail_url||row.file_url||row.public_url||'', thumbnail:row.thumbnail_url||row.file_url||row.public_url||'', file_url:row.file_url||row.public_url||'', storage_path:row.storage_path||'', uploaded_from:row.uploaded_from||'mobile_qr', upload_token:token };
+        attachQuickEvidenceToContext(ev,{returnId:row.return_id, itemId:row.return_item_id, transferId:row.transfer_id, returnedStockId:row.returned_stock_id, context_type:row.context_type||''});
+        state.remoteEvidenceImported[row.id]=true; imported++;
+        addAudit('Evidência recebida via QR Code','evidence',row.id,ev.name);
       }
-    }
+      if(imported){ save(); render(); }
+      return (data||[]).length;
+    }catch(err){ console.warn('Erro polling QR:',err); return 0; }
+  }
+  window.importRemoteEvidenceForToken = importRemoteEvidenceForToken;
 
-    async function testSupabaseConnection(){
-      const sb = getSupabase();
-      if(!sb) return alert('Supabase não está ativo.');
-      try{
-        const { error } = await sb.from('app_state').select('id').limit(1);
-        if(error) throw error;
-        state.supabase.lastError = '';
-        state.supabase.lastSyncAt = nowIso();
-        save();
-        alert('Conexão com Supabase OK.');
-      }catch(e){
-        state.supabase.lastError = e.message || String(e);
-        save();
-        alert('Erro na conexão: ' + state.supabase.lastError + '\n\nExecute o arquivo supabase_setup.sql no SQL Editor do Supabase.');
-      }
-    }
+  // Melhorar download de evidências remotas.
+  const oldDownloadEvidenceQr = window.downloadEvidence;
+  window.downloadEvidence = function(id){
+    const ev=(allEvidence()||[]).find(e=>e.id===id);
+    if(ev && ev.file_url && !ev.dataUrl){ window.open(ev.file_url,'_blank'); return; }
+    return oldDownloadEvidenceQr ? oldDownloadEvidenceQr(id) : null;
+  };
 
-    window.renderOnlineSupabase = function(){
-      ensureSupabaseConfig();
-      const evs = typeof allEvidenceCombined === 'function' ? allEvidenceCombined() : [];
-      const pendingStorage = evs.filter(ev => ev.dataUrl && String(ev.dataUrl).startsWith('data:') && !ev.storageUrl).length;
-      return `<section class="grid cols-4">
-        ${metricCard('Modo', state.supabase.enabled ? 'Online híbrido' : 'Local', 'Cloudflare + Supabase', '☁')}
-        ${metricCard('Devoluções', (state.returns||[]).length, 'Registros locais/sincronizados', '▤')}
-        ${metricCard('Evidências', evs.length, `${pendingStorage} pendente(s) de storage`, '▧')}
-        ${metricCard('Última sync', state.supabase.lastSyncAt ? brDate(state.supabase.lastSyncAt) : '-', 'Sincronização Supabase', '↻')}
-      </section>
-      <div class="card" style="margin-top:18px">
-        <div class="split"><div><h2>Online / Supabase</h2><p>Use esta área para sincronizar o app publicado no Cloudflare Pages com o Supabase Free.</p></div>${supabaseStatusBadge()}</div>
-        ${state.supabase.lastError ? `<div class="alert critica" style="margin-top:12px"><strong>!</strong><div>${esc(state.supabase.lastError)}</div></div>` : ''}
-        <div class="form-grid two" style="margin-top:16px">
-          <div class="field"><label>Supabase URL</label><input value="${esc(state.supabase.url)}" onchange="state.supabase.url=this.value.replace(/\\/rest\\/v1\\/?$/,''); supabaseClient=null; save();"></div>
-          <div class="field"><label>Anon public key</label><input value="${esc(state.supabase.anonKey)}" onchange="state.supabase.anonKey=this.value; supabaseClient=null; save();"></div>
-          <div class="field"><label>Bucket de evidências</label><input value="${esc(state.supabase.bucket)}" onchange="state.supabase.bucket=this.value; save();"></div>
-          <div class="field"><label>ID da base compartilhada</label><input value="${esc(state.supabase.stateId)}" onchange="state.supabase.stateId=this.value; save();"></div>
-          <div class="field"><label>Sincronização automática</label><select onchange="state.supabase.enabled=this.value==='true'; save(); render();"><option value="true" ${state.supabase.enabled?'selected':''}>Ativa</option><option value="false" ${!state.supabase.enabled?'selected':''}>Desativada</option></select></div>
-        </div>
-        <div class="row-actions" style="margin-top:16px">
-          <button class="btn" onclick="testSupabaseConnection()">Testar conexão</button>
-          <button class="btn primary" onclick="saveStateToSupabase(true)">Enviar base local para Supabase</button>
-          <button class="btn" onclick="loadStateFromSupabase()">Carregar base do Supabase</button>
-          <button class="btn" onclick="uploadAllEvidenceToSupabase().then(n=>{save(); alert('Evidências processadas: '+n); render();})">Enviar evidências para Storage</button>
-        </div>
-      </div>
-      <div class="card" style="margin-top:18px"><h2>Passos necessários no Supabase</h2><ol><li>Abra o Supabase → SQL Editor.</li><li>Execute o arquivo <strong>supabase_setup.sql</strong> que acompanha este pacote.</li><li>Publique este <strong>index.html</strong> no Cloudflare Pages.</li><li>Abra o app publicado e use <strong>Testar conexão</strong>.</li><li>Use <strong>Enviar base local para Supabase</strong> para migrar seus dados atuais.</li></ol><p class="hint">MVP gratuito: o estado operacional fica na tabela app_state e as evidências vão para o bucket evidencias.</p></div>`;
-    };
+  // Botões de QR em áreas já existentes.
+  const oldRenderEvidenceCenterQr = window.renderEvidenceCenter;
+  window.renderEvidenceCenter = function(){
+    let html=oldRenderEvidenceCenterQr();
+    return html.replace('Upload rápido</button>', 'Upload rápido</button><button class="btn ghost" onclick="openQrEvidenceModal({context_type:\'central\',context_id:\'central\',category:\'Documento interno\'})">QR Code real</button>');
+  };
 
-    window.testSupabaseConnection = testSupabaseConnection;
-    window.saveStateToSupabase = saveStateToSupabase;
-    window.loadStateFromSupabase = loadStateFromSupabase;
-    window.uploadAllEvidenceToSupabase = uploadAllEvidenceToSupabase;
+  // Painel simples de status online injetado em Configurações.
+  const oldRenderSettingsQr = window.renderSettings || renderSettings;
+  window.renderSettings = function(){
+    let html=oldRenderSettingsQr();
+    const box=`<div class="card" style="margin-top:18px"><div class="split"><div><h2>Online / Supabase</h2><p>Status da conexão, sincronização e base compartilhada.</p></div><div class="row-actions"><button class="btn" onclick="testSupabaseConnection()">Testar conexão</button><button class="btn primary" onclick="pushLocalToSupabase()">Enviar base local</button><button class="btn" onclick="loadFromSupabase()">Carregar base Supabase</button></div></div><p class="hint">Última sincronização: ${esc(state.supabaseStatus?.lastSyncAt||'-')}<br>Último erro: ${esc(state.supabaseStatus?.lastError||'-')}</p></div>`;
+    return html + box;
+  };
+  try{ renderSettings = window.renderSettings; }catch(e){}
 
-    // Complementa menu/rotas sem remover módulos já existentes.
-    const prevRenderSidebar = window.renderSidebar || renderSidebar;
-    window.renderSidebar = function(){
-      let html = prevRenderSidebar();
-      if(html.includes("nav('online')")) return html;
-      const btn = `<button class="${state.route==='online'?'active':''}" onclick="nav('online')"><span>☁</span>Online / Supabase</button>`;
-      return html.replace('</nav>', btn + '</nav>');
-    };
-    const prevRenderRoute = window.renderRoute || renderRoute;
-    window.renderRoute = function(){
-      if(state.route === 'online') return renderOnlineSupabase();
-      return prevRenderRoute();
-    };
-
-    const prevSaveSupabase = window.save || save;
-    window.save = function(){
-      prevSaveSupabase();
-      try{
-        ensureSupabaseConfig();
-        const raw = JSON.parse(localStorage.getItem(APP_KEY)||'{}');
-        raw.supabase = state.supabase;
-        localStorage.setItem(APP_KEY, JSON.stringify(raw));
-      }catch(e){}
-      scheduleSupabaseSave();
-    };
-
-    ensureSupabaseConfig();
-    // Não carrega a base remota automaticamente para evitar sobrescrever dados locais sem confirmação.
-  })();
+  ensureDeletionQrState();
+  save();
+})();
 
 render();
 </script>
