@@ -387,11 +387,38 @@ const initialState = {
   filters: {
     returnSearch: '',
     reportStatus: 'Todos',
-    reportMarketplace: 'Todos'
-  }
+    reportMarketplace: 'Todos',
+    stockSearch: '',
+    stockView: 'sku',
+    transferSearch: '',
+    transferTab: 'transfers'
+  },
+  warehouses: [],
+  transfers: []
 };
 
 let state = loadState();
+ensureStateExtensions();
+
+
+function ensureStateExtensions(){
+  state.filters = state.filters || {};
+  if(!state.filters.stockSearch) state.filters.stockSearch = '';
+  if(!state.filters.stockView) state.filters.stockView = 'sku';
+  if(!state.filters.transferSearch) state.filters.transferSearch = '';
+  if(!state.filters.transferTab) state.filters.transferTab = 'transfers';
+  state.warehouses = state.warehouses || defaultWarehouses();
+  state.transfers = state.transfers || [];
+  state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
+}
+
+function defaultWarehouses(){
+  return [
+    {id:uid('wh'), name:'Estoque principal', type:'Armazém', responsible:'Estoque', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'São Paulo', state:'SP', notes:'Destino padrão para itens aprovados.', is_active:true, created_at:nowIso(), updated_at:nowIso()},
+    {id:uid('wh'), name:'Área de descarte', type:'Área de descarte', responsible:'Supervisor', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'São Paulo', state:'SP', notes:'Destino para baixa por descarte.', is_active:true, created_at:nowIso(), updated_at:nowIso()},
+    {id:uid('wh'), name:'Quarentena', type:'Quarentena externa', responsible:'Qualidade', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'São Paulo', state:'SP', notes:'Área bloqueada para análise.', is_active:true, created_at:nowIso(), updated_at:nowIso()}
+  ];
+}
 
 function loadState(){
   try{
@@ -413,7 +440,9 @@ function save(){
     returns: state.returns,
     audit: state.audit,
     rules: state.rules,
-    filters: state.filters
+    filters: state.filters,
+    warehouses: state.warehouses,
+    transfers: state.transfers
   }));
 }
 
@@ -581,6 +610,9 @@ function renderSidebar(){
     ['dashboard','Painel','▦','reports'],
     ['nova','Nova devolução','＋','create_return'],
     ['devolucoes','Devoluções','▤','reports'],
+    ['estoque','Estoque Devolvido','▥','stock'],
+    ['transferencias','Transferências','⇄','stock'],
+    ['evidencias','Central de Evidências','▧','reports'],
     ['relatorios','Relatórios','◷','reports'],
     ['auditoria','Auditoria','⎋','audit'],
     ['configuracoes','Configurações','⚙','settings']
@@ -610,6 +642,9 @@ function renderTopbar(){
     dashboard:'Dashboard operacional',
     nova:'Nova devolução',
     devolucoes:'Devoluções',
+    estoque:'Estoque Devolvido',
+    transferencias:'Transferências',
+    evidencias:'Central de Evidências',
     relatorios:'Relatórios',
     auditoria:'Trilha de auditoria',
     configuracoes:'Configurações'
@@ -618,6 +653,9 @@ function renderTopbar(){
     dashboard:'Acompanhe volume, divergências, perdas e status dos processos.',
     nova:'Inicie pela chave da NF-e ou por upload do XML.',
     devolucoes:'Consulte, abra e finalize processos de devolução.',
+    estoque:'Controle os saldos dos produtos devolvidos por SKU, item, localização e destino.',
+    transferencias:'Crie transferências, baixe saldos, registre destinos e acompanhe recebimentos.',
+    evidencias:'Visualize e baixe imagens, documentos e anexos enviados pelo celular ou pelo computador.',
     relatorios:'Exporte dados para auditoria, financeiro e marketplaces.',
     auditoria:'Histórico imutável de ações relevantes.',
     configuracoes:'Regras de negócio, permissões e parâmetros do sistema.'
@@ -640,6 +678,9 @@ function renderRoute(){
   if(state.route === 'dashboard') return renderDashboard();
   if(state.route === 'nova') return renderNewReturn();
   if(state.route === 'devolucoes') return renderReturns();
+  if(state.route === 'estoque') return renderReturnedStock();
+  if(state.route === 'transferencias') return renderTransfers();
+  if(state.route === 'evidencias') return renderEvidenceCenter();
   if(state.route === 'relatorios') return renderReports();
   if(state.route === 'auditoria') return renderAudit();
   if(state.route === 'configuracoes') return renderSettings();
@@ -652,7 +693,7 @@ function getReturn(id){
 
 function filteredReturns(){
   const q = (state.filters.returnSearch || '').toLowerCase().trim();
-  let list = state.returns;
+  let list = state.returns.filter(r => !r.isDeleted);
   if(q){
     list = list.filter(r => [
       r.code, r.orderNumber, r.marketplace, r.customerName, r.trackingCode,
@@ -672,7 +713,7 @@ function destBadge(dest){
 }
 
 function renderDashboard(){
-  const list = state.returns;
+  const list = state.returns.filter(r => !r.isDeleted);
   const total = list.length;
   const stock = list.filter(r => r.status === 'Aprovado para estoque' || r.status === 'Finalizado').length;
   const quarantineItems = list.flatMap(r => r.items || []).filter(i => i.destination === 'Quarentena').length;
@@ -1832,8 +1873,190 @@ function cancelReturn(retId){
   render();
 }
 
+
+// =============================
+// Estoque devolvido, transferências e evidências
+// =============================
+function getActiveReturns(){ return state.returns.filter(r => !r.isDeleted && r.status !== 'Cancelado'); }
+
+function itemQty(item){ return Number(item.physical_received_quantity ?? item.physicalQty ?? item.receivedQty ?? item.expectedQty ?? 0) || 0; }
+function itemValue(item){ return Number(item.totalValue || (Number(item.unitValue||0) * itemQty(item)) || 0); }
+function stockKey(ret,item){ return `${ret.id}__${item.id}`; }
+
+function getTransferItems(){ return (state.transfers || []).flatMap(t => (t.items || []).map(i => ({...i, transfer:t}))); }
+
+function transferTotalsFor(retId,itemId){
+  const rows = getTransferItems().filter(i => i.returnId === retId && i.returnItemId === itemId && !['Cancelada','Recusada'].includes(i.transfer.status));
+  const reserved = rows.filter(i => ['Rascunho','Pendente de envio'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  const sent = rows.filter(i => ['Enviada','Em trânsito','Recebida','Finalizada','Parcialmente recebida'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  const inTransit = rows.filter(i => ['Enviada','Em trânsito'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  const discarded = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('descarte')).reduce((s,i)=>s+Number(i.quantity||0),0);
+  const writtenOff = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('perda')).reduce((s,i)=>s+Number(i.quantity||0),0);
+  return {reserved, sent, inTransit, discarded, writtenOff};
+}
+
+function getReturnedStockRows(){
+  return getActiveReturns().flatMap(ret => (ret.items || []).map(item => {
+    const qty = itemQty(item);
+    const totals = transferTotalsFor(ret.id,item.id);
+    const currentBalance = Math.max(0, qty - totals.sent - totals.writtenOff);
+    const available = Math.max(0, currentBalance - totals.reserved);
+    return {
+      id: stockKey(ret,item), returnId:ret.id, itemId:item.id, code:ret.code,
+      orderNumber:ret.orderNumber, customerName:ret.customerName, marketplace:ret.marketplace,
+      invoiceNumber:ret.invoice?.number || '', invoiceKey:ret.invoice?.accessKey || '',
+      createdAt:ret.createdAt, sku:item.sku || '', ean:item.ean || '', product:item.description || '', variation:item.variation || '', category:item.category || '',
+      physicalQuantity:qty, availableQuantity:available, reservedQuantity:totals.reserved, transferredQuantity:totals.sent,
+      inTransitQuantity:totals.inTransit, writtenOffQuantity:totals.writtenOff, discardedQuantity:totals.discarded, currentBalance,
+      unitValue:Number(item.unitValue||0), totalValue:itemValue(item), condition:item.physicalCondition||'', packageCondition:item.packageCondition||'',
+      status:item.destination || 'Análise manual', finalDestination:item.destination || 'Análise manual', location:item.location || defaultLocationForDestination(item.destination),
+      evidences:(item.evidences||[]), item, ret
+    };
+  }));
+}
+
+function defaultLocationForDestination(dest){
+  if(dest === 'Quarentena') return 'Quarentena';
+  if(dest === 'Descarte') return 'Área de descarte';
+  if(dest === 'Reparo/Reembalagem') return 'Reembalagem';
+  if(dest === 'Reabastecimento') return 'Estoque principal';
+  return 'Área de devoluções';
+}
+
+function filterStockRows(rows){
+  const q=(state.filters.stockSearch||'').toLowerCase().trim();
+  if(!q) return rows;
+  return rows.filter(r => [r.sku,r.ean,r.product,r.code,r.orderNumber,r.invoiceNumber,r.marketplace,r.customerName,r.status,r.location].join(' ').toLowerCase().includes(q));
+}
+
+function renderReturnedStock(){
+  ensureStateExtensions();
+  const mode = state.filters.stockView || 'sku';
+  const rows = filterStockRows(getReturnedStockRows());
+  const totalQty = rows.reduce((s,r)=>s+r.physicalQuantity,0);
+  const available = rows.reduce((s,r)=>s+r.availableQuantity,0);
+  const blocked = rows.reduce((s,r)=>s+Math.max(0,r.currentBalance-r.availableQuantity),0);
+  const transferred = rows.reduce((s,r)=>s+r.transferredQuantity,0);
+  const value = rows.reduce((s,r)=>s+r.totalValue,0);
+  return `
+    <section class="grid cols-4">
+      ${metric('Unidades devolvidas', num(totalQty), 'Quantidade física total')}
+      ${metric('Disponível', num(available), 'Saldo disponível')}
+      ${metric('Bloqueado/reservado', num(blocked), 'Quarentena, reserva ou trânsito')}
+      ${metric('Valor devolvido', money(value), 'Valor estimado')}
+    </section>
+    <div class="card" style="margin-top:18px">
+      <div class="split">
+        <div><h2>Estoque Devolvido</h2><p>Alterne a visão por SKU, item, devolução, localização ou destino final.</p></div>
+        <div class="row-actions"><button class="btn" onclick="exportStockCsv()">Exportar CSV</button><button class="btn primary" onclick="nav('transferencias')">Nova transferência</button></div>
+      </div>
+      <div class="tabs" style="margin-top:14px">
+        ${['sku','item','devolucao','localizacao','destino'].map(m=>`<button class="${mode===m?'active':''}" onclick="state.filters.stockView='${m}'; save(); render()">${m==='sku'?'Por produto/SKU':m==='item'?'Por item':m==='devolucao'?'Por devolução':m==='localizacao'?'Por localização':'Por destino'}</button>`).join('')}
+      </div>
+      <div class="field" style="margin-top:14px"><input placeholder="Buscar SKU, produto, pedido, NF-e, localização..." value="${esc(state.filters.stockSearch||'')}" oninput="state.filters.stockSearch=this.value; save(); render()"></div>
+      ${mode==='sku'?renderStockBySku(rows):mode==='item'?renderStockByItem(rows):mode==='devolucao'?renderStockGrouped(rows,'code','Devolução'):mode==='localizacao'?renderStockGrouped(rows,'location','Localização'):renderStockGrouped(rows,'finalDestination','Destino final')}
+    </div>`;
+}
+
+function renderStockBySku(rows){
+  const map = {};
+  rows.forEach(r=>{
+    const k=r.sku || 'Sem SKU';
+    map[k]=map[k]||{sku:k, ean:r.ean, product:r.product, total:0,value:0,available:0,reserved:0,transferred:0,inTransit:0,writtenOff:0,discarded:0,balance:0,returns:new Set(),status:{}};
+    const g=map[k];
+    g.total+=r.physicalQuantity; g.value+=r.totalValue; g.available+=r.availableQuantity; g.reserved+=r.reservedQuantity; g.transferred+=r.transferredQuantity; g.inTransit+=r.inTransitQuantity; g.writtenOff+=r.writtenOffQuantity; g.discarded+=r.discardedQuantity; g.balance+=r.currentBalance; g.returns.add(r.returnId); g.status[r.status]=(g.status[r.status]||0)+r.physicalQuantity;
+  });
+  const list=Object.values(map);
+  if(!list.length) return empty('Nenhum item devolvido com saldo.');
+  return `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>SKU</th><th>Produto</th><th>Total</th><th>Disponível</th><th>Reservado</th><th>Transferido</th><th>Em trânsito</th><th>Descartado</th><th>Saldo</th><th>Situação</th><th>Ações</th></tr></thead><tbody>${list.map(g=>`<tr><td><strong>${esc(g.sku)}</strong><br><span class="hint">${esc(g.ean||'-')}</span></td><td>${esc(g.product||'-')}<br><span class="hint">${g.returns.size} devolução(ões) · ${money(g.value)}</span></td><td>${num(g.total)}</td><td>${num(g.available)}</td><td>${num(g.reserved)}</td><td>${num(g.transferred)}</td><td>${num(g.inTransit)}</td><td>${num(g.discarded)}</td><td><strong>${num(g.balance)}</strong></td><td>${Object.entries(g.status).map(([k,v])=>`${destBadge(k)} <span class="hint">${num(v)}</span>`).join('<br>')}</td><td><button class="btn small" onclick="openSkuDetail('${esc(g.sku)}')">Detalhar</button></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderStockByItem(rows){
+  if(!rows.length) return empty('Nenhum item devolvido.');
+  return `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Devolução</th><th>SKU / Produto</th><th>Qtd física</th><th>Disponível</th><th>Reservado</th><th>Transferido</th><th>Saldo</th><th>Destino</th><th>Localização</th><th>Evidências</th><th>Ações</th></tr></thead><tbody>${rows.map(r=>`<tr><td><strong>${esc(r.code)}</strong><br><span class="hint">${esc(r.orderNumber||'-')}</span></td><td><strong>${esc(r.sku)}</strong><br><span class="hint">${esc(r.product)}</span></td><td>${num(r.physicalQuantity)}</td><td>${num(r.availableQuantity)}</td><td>${num(r.reservedQuantity)}</td><td>${num(r.transferredQuantity)}</td><td><strong>${num(r.currentBalance)}</strong></td><td>${destBadge(r.finalDestination)}</td><td>${esc(r.location)}</td><td>${r.evidences.length}</td><td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.returnId}')">Abrir</button><button class="btn small" onclick="openQuickTransfer('${r.id}')">Transferir</button><button class="btn small" onclick="openEvidenceQr('item','${r.returnId}','${r.itemId}','Produto recebido')">QR</button></div></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function renderStockGrouped(rows,key,label){
+  const map=countBy(rows,r=>r[key]||'Sem informação');
+  if(!Object.keys(map).length) return empty('Sem dados para esta visão.');
+  return `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>${label}</th><th>Unidades</th><th>Disponível</th><th>Transferido</th><th>Valor</th></tr></thead><tbody>${Object.keys(map).map(k=>{const rs=rows.filter(r=>(r[key]||'Sem informação')===k);return `<tr><td><strong>${esc(k)}</strong></td><td>${num(rs.reduce((s,r)=>s+r.physicalQuantity,0))}</td><td>${num(rs.reduce((s,r)=>s+r.availableQuantity,0))}</td><td>${num(rs.reduce((s,r)=>s+r.transferredQuantity,0))}</td><td>${money(rs.reduce((s,r)=>s+r.totalValue,0))}</td></tr>`}).join('')}</tbody></table></div>`;
+}
+
+function openSkuDetail(sku){
+  const rows=getReturnedStockRows().filter(r=>r.sku===sku);
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1000px"><div class="modal-header"><div><h2>Detalhe do SKU ${esc(sku)}</h2><p>${esc(rows[0]?.product||'')}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${renderStockByItem(rows)}</div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+}
+
+function exportStockCsv(){
+  const rows=[['Devolucao','Pedido','SKU','Produto','Qtd fisica','Disponivel','Reservado','Transferido','Em transito','Baixado','Descartado','Saldo','Destino','Localizacao','Valor']];
+  getReturnedStockRows().forEach(r=>rows.push([r.code,r.orderNumber,r.sku,r.product,r.physicalQuantity,r.availableQuantity,r.reservedQuantity,r.transferredQuantity,r.inTransitQuantity,r.writtenOffQuantity,r.discardedQuantity,r.currentBalance,r.finalDestination,r.location,r.totalValue]));
+  download('estoque-devolvido.csv', rows.map(row=>row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
+}
+
+function renderTransfers(){
+  ensureStateExtensions();
+  const tab=state.filters.transferTab||'transfers';
+  return `<div class="card"><div class="split"><div><h2>Transferências</h2><p>Controle destinos operacionais, baixas, descarte, envio e recebimento.</p></div><div class="row-actions"><button class="btn primary" onclick="openTransferModal()">Nova transferência</button><button class="btn" onclick="exportTransfersCsv()">Exportar CSV</button></div></div><div class="tabs" style="margin-top:14px"><button class="${tab==='transfers'?'active':''}" onclick="state.filters.transferTab='transfers'; save(); render()">Transferências</button><button class="${tab==='warehouses'?'active':''}" onclick="state.filters.transferTab='warehouses'; save(); render()">Armazéns / Destinos</button></div>${tab==='warehouses'?renderWarehouses():renderTransfersList()}</div>`;
+}
+
+function renderTransfersList(){
+  const q=(state.filters.transferSearch||'').toLowerCase().trim();
+  let list=state.transfers||[];
+  if(q) list=list.filter(t=>[t.code,t.type,t.destination_name,t.destination_address,t.status,t.created_by].join(' ').toLowerCase().includes(q));
+  const totalQty=list.reduce((s,t)=>s+Number(t.total_quantity||0),0);
+  const totalValue=list.reduce((s,t)=>s+Number(t.total_value||0),0);
+  return `<section class="grid cols-4" style="margin-top:18px">${metric('Transferências', list.length, 'Total criadas')}${metric('Quantidade', num(totalQty), 'Itens transferidos')}${metric('Valor', money(totalValue), 'Valor transferido')}${metric('Em trânsito', list.filter(t=>['Enviada','Em trânsito'].includes(t.status)).length, 'Aguardando recebimento')}</section><div class="field" style="margin-top:14px"><input placeholder="Buscar transferência, destino, status..." value="${esc(state.filters.transferSearch||'')}" oninput="state.filters.transferSearch=this.value; save(); render()"></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Código</th><th>Tipo / Destino</th><th>Qtd</th><th>Valor</th><th>Status</th><th>Datas</th><th>Ações</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(t.code)}</strong><br><span class="hint">${esc(t.document_number||'-')}</span></td><td>${esc(t.type)}<br><span class="hint">${esc(t.destination_name)} · ${esc(t.destination_address||'')}</span></td><td>${num(t.total_quantity)}</td><td>${money(t.total_value)}</td><td>${statusBadge(t.status)}</td><td><span class="hint">Criada: ${brDate(t.created_at)}<br>Envio: ${brDate(t.shipped_at)}<br>Receb.: ${brDate(t.received_at)}</span></td><td><div class="row-actions"><button class="btn small" onclick="openTransferDetail('${t.id}')">Detalhe</button><button class="btn small" onclick="confirmTransferShipment('${t.id}')" ${['Enviada','Em trânsito','Recebida','Finalizada','Cancelada'].includes(t.status)?'disabled':''}>Confirmar envio</button><button class="btn small" onclick="confirmTransferReceipt('${t.id}')" ${!['Enviada','Em trânsito'].includes(t.status)?'disabled':''}>Receber</button><button class="btn danger small" onclick="cancelTransfer('${t.id}')" ${!['Rascunho','Pendente de envio'].includes(t.status)?'disabled':''}>Cancelar</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('Nenhuma transferência criada.')}`;
+}
+
+function renderWarehouses(){
+  const list=state.warehouses||[];
+  return `<div style="margin-top:18px"><div class="split"><h2>Armazéns / Destinos</h2><button class="btn primary" onclick="openWarehouseModal()">Cadastrar destino</button></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Local</th><th>Tipo</th><th>Contato</th><th>Endereço</th><th>Status</th></tr></thead><tbody>${list.map(w=>`<tr><td><strong>${esc(w.name)}</strong><br><span class="hint">${esc(w.document||'')}</span></td><td>${esc(w.type)}</td><td>${esc(w.responsible||'-')}<br><span class="hint">${esc(w.phone||'')} ${esc(w.email||'')}</span></td><td>${esc(fullWarehouseAddress(w)||'-')}</td><td>${w.is_active?'Ativo':'Inativo'}</td></tr>`).join('')}</tbody></table></div>`:empty('Nenhum destino cadastrado.')}</div>`;
+}
+
+function fullWarehouseAddress(w){ return [w.address,w.number,w.complement,w.district,w.city,w.state,w.zip_code].filter(Boolean).join(', '); }
+
+function openWarehouseModal(){
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>Cadastrar destino</h2><p>Base de armazéns, depósitos, descarte, outlet e fornecedores.</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><form onsubmit="saveWarehouse(event)" class="form-grid two"><div class="field"><label>Nome do local</label><input name="name" required></div><div class="field"><label>Tipo</label><select name="type"><option>Armazém</option><option>Depósito</option><option>CD</option><option>Outlet</option><option>Área de descarte</option><option>Fornecedor</option><option>Reparo</option><option>Reembalagem</option><option>Quarentena externa</option><option>Outro</option></select></div><div class="field"><label>CNPJ</label><input name="document"></div><div class="field"><label>Responsável</label><input name="responsible"></div><div class="field"><label>Telefone</label><input name="phone"></div><div class="field"><label>E-mail</label><input name="email"></div><div class="field"><label>CEP</label><input name="zip_code"></div><div class="field"><label>Endereço</label><input name="address"></div><div class="field"><label>Número</label><input name="number"></div><div class="field"><label>Complemento</label><input name="complement"></div><div class="field"><label>Bairro</label><input name="district"></div><div class="field"><label>Cidade</label><input name="city"></div><div class="field"><label>UF</label><input name="state" maxlength="2"></div><div class="field"><label>Observações</label><textarea name="notes"></textarea></div><div class="row-actions" style="grid-column:1/-1"><button class="btn" type="button" onclick="closeModal()">Cancelar</button><button class="btn primary" type="submit">Salvar destino</button></div></form></div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+}
+
+function saveWarehouse(ev){
+  ev.preventDefault(); const f=new FormData(ev.target); const w={id:uid('wh'), is_active:true, created_at:nowIso(), updated_at:nowIso()};
+  ['name','type','document','responsible','phone','email','zip_code','address','number','complement','district','city','state','notes'].forEach(k=>w[k]=String(f.get(k)||''));
+  state.warehouses.unshift(w); addAudit('Destino cadastrado','armazém',w.id,w.name); closeModal(); render();
+}
+
+function openTransferModal(prefillStockId=''){
+  const stock=filterStockRows(getReturnedStockRows()).filter(r=>r.availableQuantity>0);
+  const whs=(state.warehouses||[]).filter(w=>w.is_active);
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1100px"><div class="modal-header"><div><h2>Nova transferência</h2><p>Selecione o destino e os itens do estoque devolvido.</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><form id="transferForm" onsubmit="saveTransfer(event)"><div class="form-grid two"><div class="field"><label>Tipo da transferência</label><select name="type" required><option>Transferência para outro armazém</option><option>Transferência para depósito</option><option>Transferência para CD</option><option>Transferência para outlet</option><option>Transferência para fornecedor</option><option>Transferência para reparo</option><option>Transferência para reembalagem</option><option>Transferência para quarentena externa</option><option>Transferência para descarte</option><option>Transferência para doação</option><option>Transferência para perda operacional</option></select></div><div class="field"><label>Destino cadastrado</label><select name="warehouse" onchange="fillTransferWarehouse(this.value)"><option value="">Destino manual</option>${whs.map(w=>`<option value="${esc(w.id)}">${esc(w.name)} · ${esc(w.type)}</option>`).join('')}</select></div><div class="field"><label>Nome do destino</label><input name="destination_name" id="trDestName" required></div><div class="field"><label>Responsável</label><input name="destination_contact" id="trDestContact"></div><div class="field" style="grid-column:1/-1"><label>Endereço completo</label><input name="destination_address" id="trDestAddress" required></div><div class="field"><label>Transportadora</label><input name="carrier"></div><div class="field"><label>Rastreio</label><input name="tracking_code"></div><div class="field"><label>Documento interno</label><input name="document_number"></div><div class="field"><label>Data prevista de envio</label><input type="date" name="expected_ship_date"></div><div class="field"><label>Data prevista de recebimento</label><input type="date" name="expected_receive_date"></div><div class="field"><label>Observações</label><textarea name="notes"></textarea></div></div><h3 style="margin-top:18px">Itens disponíveis</h3><div class="table-wrap" style="max-height:360px"><table><thead><tr><th>Selecionar</th><th>SKU / Produto</th><th>Devolução</th><th>Disponível</th><th>Qtd a transferir</th><th>Destino atual</th></tr></thead><tbody>${stock.map(r=>`<tr><td><input type="checkbox" name="stock_id" value="${esc(r.id)}" ${prefillStockId===r.id?'checked':''}></td><td><strong>${esc(r.sku)}</strong><br><span class="hint">${esc(r.product)}</span></td><td>${esc(r.code)}<br><span class="hint">${esc(r.orderNumber||'-')}</span></td><td>${num(r.availableQuantity)}</td><td><input type="number" name="qty_${esc(r.id)}" min="0" max="${esc(r.availableQuantity)}" step="0.0001" value="${prefillStockId===r.id?esc(r.availableQuantity):''}"></td><td>${destBadge(r.finalDestination)}</td></tr>`).join('')}</tbody></table></div><div class="row-actions" style="margin-top:16px"><button class="btn" type="button" onclick="closeModal()">Cancelar</button><button class="btn primary" type="submit">Criar transferência</button></div></form></div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+}
+function openQuickTransfer(stockId){ openTransferModal(stockId); }
+function fillTransferWarehouse(id){ const w=(state.warehouses||[]).find(x=>x.id===id); if(!w) return; document.getElementById('trDestName').value=w.name; document.getElementById('trDestContact').value=w.responsible||''; document.getElementById('trDestAddress').value=fullWarehouseAddress(w); }
+function saveTransfer(ev){
+  ev.preventDefault(); const f=new FormData(ev.target); const selected=f.getAll('stock_id'); if(!selected.length){ alert('Selecione ao menos um item.'); return; }
+  const rows=getReturnedStockRows(); const items=[]; let totalQty=0,totalValue=0;
+  for(const sid of selected){ const r=rows.find(x=>x.id===sid); if(!r) continue; const q=Number(f.get('qty_'+sid)||0); if(q<=0){ alert('Informe quantidade válida para '+r.sku); return; } if(q>r.availableQuantity){ alert('Quantidade maior que saldo disponível para '+r.sku); return; } items.push({id:uid('tri'), returnedStockId:sid, returnId:r.returnId, returnItemId:r.itemId, sku:r.sku, ean:r.ean, productName:r.product, quantity:q, unitValue:r.unitValue, totalValue:q*r.unitValue, originLocation:r.location, destinationLocation:String(f.get('destination_name')||''), balanceBefore:r.currentBalance, balanceAfter:Math.max(0,r.currentBalance-q), status:'Pendente', notes:''}); totalQty+=q; totalValue+=q*r.unitValue; }
+  const t={id:uid('tr'), code:'TRF-'+new Date().toISOString().slice(2,10).replace(/-/g,'')+'-'+String((state.transfers||[]).length+1).padStart(4,'0'), type:String(f.get('type')||''), destination_id:String(f.get('warehouse')||''), destination_name:String(f.get('destination_name')||''), destination_address:String(f.get('destination_address')||''), destination_contact:String(f.get('destination_contact')||''), status:'Pendente de envio', created_by:currentUserName(), created_at:nowIso(), expected_ship_date:String(f.get('expected_ship_date')||''), expected_receive_date:String(f.get('expected_receive_date')||''), shipped_at:'', received_at:'', carrier:String(f.get('carrier')||''), tracking_code:String(f.get('tracking_code')||''), document_number:String(f.get('document_number')||''), notes:String(f.get('notes')||''), total_quantity:totalQty,total_value:totalValue, items, audit_history:[{at:nowIso(),user:currentUserName(),action:'Transferência criada'}]};
+  state.transfers.unshift(t); addAudit('Transferência criada','transferência',t.id,`${t.code} · ${t.destination_name}`); closeModal(); render();
+}
+function openTransferDetail(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1000px"><div class="modal-header"><div><h2>${esc(t.code)}</h2><p>${esc(t.type)} · ${esc(t.destination_name)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><div class="grid cols-2"><div class="item-card"><strong>Status</strong><p>${statusBadge(t.status)}</p><p class="hint">Criada por ${esc(t.created_by)} em ${brDate(t.created_at)}</p></div><div class="item-card"><strong>Destino</strong><p>${esc(t.destination_address||'-')}</p><p class="hint">${esc(t.destination_contact||'')}</p></div></div><h3 style="margin-top:18px">Itens</h3><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Produto</th><th>Qtd</th><th>Saldo antes</th><th>Saldo depois</th><th>Valor</th></tr></thead><tbody>${(t.items||[]).map(i=>`<tr><td>${esc(i.sku)}</td><td>${esc(i.productName)}</td><td>${num(i.quantity)}</td><td>${num(i.balanceBefore)}</td><td>${num(i.balanceAfter)}</td><td>${money(i.totalValue)}</td></tr>`).join('')}</tbody></table></div><h3 style="margin-top:18px">Histórico</h3>${renderTimeline(t.audit_history||[])}<div class="row-actions" style="margin-top:16px"><button class="btn small" onclick="openEvidenceQr('transfer','','','Transferência')">Anexar evidência via QR</button></div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
+function confirmTransferShipment(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; if(!confirm(`Confirmar envio de ${t.code}? O saldo será baixado/reservado como enviado.`)) return; t.status=String(t.type||'').toLowerCase().includes('descarte')?'Finalizada':'Enviada'; t.shipped_at=nowIso(); (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Envio confirmado'}); addAudit('Transferência enviada','transferência',t.id,t.code); render(); }
+function confirmTransferReceipt(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; t.status='Recebida'; t.received_at=nowIso(); (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Recebimento confirmado'}); addAudit('Transferência recebida','transferência',t.id,t.code); render(); }
+function cancelTransfer(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; const reason=prompt('Motivo do cancelamento:'); if(!reason) return; t.status='Cancelada'; (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Cancelada',detail:reason}); addAudit('Transferência cancelada','transferência',t.id,reason); render(); }
+function exportTransfersCsv(){ const rows=[['Codigo','Tipo','Destino','Endereco','Qtd','Valor','Status','Criada em','Enviada em','Recebida em']]; (state.transfers||[]).forEach(t=>rows.push([t.code,t.type,t.destination_name,t.destination_address,t.total_quantity,t.total_value,t.status,brDate(t.created_at),brDate(t.shipped_at),brDate(t.received_at)])); download('transferencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
+
+function renderEvidenceCenter(){
+  const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-grid" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+}
+function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=e.preview||e.file_url||e.thumbnail_url||''; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${url?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc">`:empty('Arquivo sem preview.')}<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
+function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
+
 function renderReports(){
-  const list = state.returns.filter(r => {
+  const list = state.returns.filter(r => !r.isDeleted).filter(r => {
     const statusOk = state.filters.reportStatus === 'Todos' || r.status === state.filters.reportStatus;
     const mktOk = state.filters.reportMarketplace === 'Todos' || r.marketplace === state.filters.reportMarketplace;
     return statusOk && mktOk;
