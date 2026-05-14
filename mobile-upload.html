@@ -60,8 +60,10 @@ function render(){
 }
 async function init(){
   try{
-    const {data,error}=await sb.from('qr_upload_tokens').select('*').eq('token',token).single();
-    if(error) throw error; tokenRow=data; render();
+    const {data,error}=await sb.from('qr_upload_tokens').select('*').eq('token',token).order('created_at',{ascending:false}).limit(1).maybeSingle();
+    if(error) throw error;
+    if(!data) throw new Error('Token não encontrado. Gere um novo QR Code no computador e tente novamente.');
+    tokenRow=data; render();
   }catch(e){document.getElementById('app').innerHTML='<div class="card"><div class="alert err">Token inválido ou indisponível: '+esc(e.message||e)+'</div></div>';}
 }
 async function addFiles(fileList){

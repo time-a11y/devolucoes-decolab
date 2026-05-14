@@ -3515,8 +3515,18 @@ function downloadReturnCsv(retId){
     try{
       const rec=await createRemoteQrToken(context); const url=mobileUploadUrl(rec.token); const meta=rec.metadata_json||{};
       const box=document.getElementById('qrStatusBox');
-      box.innerHTML=`<div class="grid cols-2"><div><canvas id="qrCanvas" style="width:280px;max-width:100%;background:#fff;border-radius:16px;padding:12px"></canvas><div class="row-actions" style="margin-top:10px"><button class="btn" onclick="navigator.clipboard.writeText('${url.replace(/'/g,"\\'")}'); alert('Link copiado')">Copiar link</button><a class="btn primary" href="${esc(url)}" target="_blank">Abrir upload</a></div></div><div><h3>Contexto</h3><p><strong>${esc(meta.returnCode||meta.transferCode||'Evidência')}</strong></p><p>Pedido: ${esc(meta.orderNumber||'-')}<br>SKU: ${esc(meta.sku||'-')}<br>Produto: ${esc(meta.product||'-')}<br>Categoria: ${esc(meta.category||'-')}</p><p class="hint">Validade: 15 minutos<br>Status: <span id="qrLiveStatus">Aguardando envio pelo celular...</span></p><div id="qrReceivedList"></div></div></div>`;
-      if(window.QRCode && QRCode.toCanvas){ QRCode.toCanvas(document.getElementById('qrCanvas'), url, {width:280, margin:1}); }
+      const safeUrl = esc(url);
+      const copyUrl = url.replace(/'/g, "\\'");
+      const qrFallback = 'https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=10&data=' + encodeURIComponent(url);
+      box.innerHTML=`<div class="grid cols-2"><div><div id="qrVisualBox" style="width:280px;max-width:100%;background:#fff;border-radius:16px;padding:12px;display:grid;place-items:center;min-height:280px"><img id="qrFallbackImg" src="${qrFallback}" alt="QR Code" style="width:260px;max-width:100%;height:auto"></div><p class="hint" style="word-break:break-all;margin-top:8px">Link: <span>${safeUrl}</span></p><div class="row-actions" style="margin-top:10px"><button class="btn" onclick="navigator.clipboard.writeText('${copyUrl}'); alert('Link copiado')">Copiar link</button><a class="btn primary" href="${safeUrl}" target="_blank">Abrir upload</a></div></div><div><h3>Contexto</h3><p><strong>${esc(meta.returnCode||meta.transferCode||'Evidência')}</strong></p><p>Pedido: ${esc(meta.orderNumber||'-')}<br>SKU: ${esc(meta.sku||'-')}<br>Produto: ${esc(meta.product||'-')}<br>Categoria: ${esc(meta.category||'-')}</p><p class="hint">Validade: 15 minutos<br>Status: <span id="qrLiveStatus">Aguardando envio pelo celular...</span></p><div id="qrReceivedList"></div></div></div>`;
+      try{
+        if(window.QRCode && QRCode.toCanvas){
+          const canvas=document.createElement('canvas');
+          QRCode.toCanvas(canvas, url, {width:260, margin:1}, function(err){
+            if(!err){ const qbox=document.getElementById('qrVisualBox'); if(qbox){ qbox.innerHTML=''; qbox.appendChild(canvas); } }
+          });
+        }
+      }catch(qrErr){ console.warn('Falha ao renderizar QR local, usando fallback por imagem.', qrErr); }
       startQrEvidencePolling(rec.token);
       addAudit('QR Code de evidência criado','qr_upload_token',rec.id,`${rec.context_type} · ${meta.returnCode||meta.transferCode||''}`);
     }catch(err){ document.getElementById('qrStatusBox').innerHTML=`<div class="alert critica"><strong>Erro</strong><div>${esc(err.message||String(err))}</div></div>`; }
