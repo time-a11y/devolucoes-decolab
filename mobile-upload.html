@@ -55,15 +55,13 @@ function render(){
   if(!tokenRow){app.innerHTML='<div class="card"><p>Validando token...</p></div>';return;}
   const meta=tokenRow.metadata_json||{};
   const expired=new Date(tokenRow.expires_at).getTime()<Date.now() || tokenRow.status!=='active';
-  app.innerHTML = `<div class="card"><h2 style="margin-top:0">Contexto da evidência</h2><div class="context"><div class="row"><strong>Devolução</strong><span>${esc(meta.returnCode||'-')}</span></div><div class="row"><strong>Pedido</strong><span>${esc(meta.orderNumber||'-')}</span></div><div class="row"><strong>SKU</strong><span>${esc(meta.sku||'-')}</span></div><div class="row"><strong>Produto</strong><span>${esc(meta.product||meta.transferCode||'-')}</span></div><div class="row"><strong>Validade</strong><span>${new Date(tokenRow.expires_at).toLocaleString('pt-BR')}</span></div></div>${expired?'<div class="alert err">Token expirado ou inativo. Gere um novo QR Code no computador.</div>':''}</div>${expired?'':`<div class="card"><label>Categoria</label><select id="category">${CATEGORIES.map(c=>`<option ${c===(tokenRow.category||meta.category)?'selected':''}>${c}</option>`).join('')}</select><label>Observação</label><textarea id="notes" placeholder="Ex.: foto dos dois produtos recebidos, avaria na embalagem..."></textarea><div class="actions"><label class="btn primary"><input id="camera" type="file" accept="image/*" capture="environment" style="display:none">Capturar foto</label><label class="btn"><input id="gallery" type="file" multiple accept="image/*,video/*,.pdf,.xml,.csv,.xlsx" style="display:none">Selecionar da galeria</label></div><div id="preview" class="preview"></div><div class="progress hidden" id="progress"><div></div></div><button class="btn primary" style="width:100%;margin-top:14px" onclick="sendFiles()">Enviar evidência</button><p class="hint">Imagens serão comprimidas automaticamente antes do envio.</p></div>`}`;
+  app.innerHTML = `<div class="card"><h2 style="margin-top:0">Contexto da evidência</h2><div class="context"><div class="row"><strong>Devolução</strong><span>${esc(meta.returnCode||'-')}</span></div><div class="row"><strong>Pedido</strong><span>${esc(meta.orderNumber||'-')}</span></div><div class="row"><strong>SKU</strong><span>${esc(meta.sku||'-')}</span></div><div class="row"><strong>Produto</strong><span>${esc(meta.product||meta.transferCode||'-')}</span></div><div class="row"><strong>Validade</strong><span>${new Date(tokenRow.expires_at).toLocaleString('pt-BR')}</span></div></div>${expired?'<div class="alert err">Token expirado ou inativo. Gere um novo QR Code no computador.</div>':''}</div>${expired?'':`<div class="card"><label>Categoria</label><select id="category">${CATEGORIES.map(c=>`<option ${c===(tokenRow.category||meta.category)?'selected':''}>${c}</option>`).join('')}</select><label>Observação</label><textarea id="notes" placeholder="Ex.: foto dos dois produtos recebidos, avaria na embalagem..."></textarea><div class="actions"><label class="btn primary"><input id="camera" type="file" accept="image/*" capture="environment" style="display:none">Capturar foto</label><label class="btn"><input id="gallery" type="file" multiple accept="image/*,video/*,.pdf,.xml,.csv,.xlsx" style="display:none">Selecionar da galeria</label></div><div id="preview" class="preview"></div><div class="progress hidden" id="progress"><div></div></div><button id="sendEvidenceBtn" class="btn primary" style="width:100%;margin-top:14px" onclick="sendFiles()">Enviar evidência</button><p class="hint">Imagens serão comprimidas automaticamente antes do envio.</p></div>`}`;
   if(!expired){document.getElementById('camera').onchange=e=>addFiles(e.target.files);document.getElementById('gallery').onchange=e=>addFiles(e.target.files);drawPreview();}
 }
 async function init(){
   try{
-    const {data,error}=await sb.from('qr_upload_tokens').select('*').eq('token',token).order('created_at',{ascending:false}).limit(1).maybeSingle();
-    if(error) throw error;
-    if(!data) throw new Error('Token não encontrado. Gere um novo QR Code no computador e tente novamente.');
-    tokenRow=data; render();
+    const {data,error}=await sb.from('qr_upload_tokens').select('*').eq('token',token).single();
+    if(error) throw error; tokenRow=data; render();
   }catch(e){document.getElementById('app').innerHTML='<div class="card"><div class="alert err">Token inválido ou indisponível: '+esc(e.message||e)+'</div></div>';}
 }
 async function addFiles(fileList){
@@ -76,23 +74,93 @@ function drawPreview(){
   const el=document.getElementById('preview'); if(!el)return;
   el.innerHTML=selectedFiles.map((f,i)=>`<div class="file">${f.preview?`<img src="${f.thumbnail||f.preview}">`:`<div class="icon">${f.mime.includes('pdf')?'PDF':f.mime.includes('video')?'VID':'DOC'}</div>`}<div class="body"><strong>${esc(f.file.name)}</strong><br>${bytes(f.originalSize)} → ${bytes(f.finalSize)}<br>${f.compressed?'Comprimida':'Original'}<br><button class="btn danger" style="padding:8px;margin-top:8px;width:100%" onclick="selectedFiles.splice(${i},1);drawPreview()">Remover</button></div></div>`).join('');
 }
+function showMobileError(message){
+  const app=document.getElementById('app');
+  const box=document.getElementById('mobileUploadError') || document.createElement('div');
+  box.id='mobileUploadError';
+  box.className='alert err';
+  box.innerHTML='<strong>Falha no envio.</strong><br>'+esc(message||'Erro desconhecido.');
+  const card=app.querySelector('.card:last-of-type') || app;
+  card.prepend(box);
+  try{ box.scrollIntoView({behavior:'smooth', block:'start'}); }catch(e){}
+}
+function setUploadStatus(text, pct){
+  const p=document.getElementById('progress');
+  if(p){ p.classList.remove('hidden'); const bar=p.querySelector('div'); if(bar) bar.style.width=(pct||0)+'%'; }
+  let msg=document.getElementById('uploadStatusMsg');
+  if(!msg){ msg=document.createElement('p'); msg.id='uploadStatusMsg'; msg.className='hint'; const btn=document.getElementById('sendEvidenceBtn'); if(btn) btn.insertAdjacentElement('beforebegin', msg); }
+  msg.textContent=text||'';
+}
 async function sendFiles(){
-  if(!selectedFiles.length){alert('Selecione pelo menos um arquivo.');return;}
-  const p=document.getElementById('progress'); const bar=p.querySelector('div'); p.classList.remove('hidden'); bar.style.width='0%';
-  const category=document.getElementById('category').value; const notes=document.getElementById('notes').value||''; const meta=tokenRow.metadata_json||{};
-  let sent=0;
-  for(const f of selectedFiles){
-    const id=uid('ev'); const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,12); const baseName=slug([meta.orderNumber||meta.returnCode||meta.transferCode||'evidencia',meta.sku||'',category,stamp].filter(Boolean).join('_'))+'.'+f.ext;
-    let folder='general'; if(tokenRow.return_id) folder=`returns/${tokenRow.return_id}`; if(tokenRow.return_item_id) folder+=`/items/${tokenRow.return_item_id}`; if(tokenRow.transfer_id) folder=`transfers/${tokenRow.transfer_id}`; if(tokenRow.returned_stock_id) folder=`stock/${tokenRow.returned_stock_id}`;
-    const path=`${folder}/mobile/${id}-${baseName}`;
-    const {error:upErr}=await sb.storage.from('evidencias').upload(path,f.uploadBlob,{contentType:f.mime,upsert:false}); if(upErr) throw upErr;
-    const {data:pub}=sb.storage.from('evidencias').getPublicUrl(path);
-    const row={id, context_type:tokenRow.context_type, context_id:tokenRow.context_id, return_id:tokenRow.return_id, return_item_id:tokenRow.return_item_id, returned_stock_id:tokenRow.returned_stock_id, transfer_id:tokenRow.transfer_id, movement_id:tokenRow.movement_id, category, evidence_type:category, file_name:baseName, original_name:f.file.name, mime_type:f.mime, file_size:f.finalSize, storage_bucket:'evidencias', storage_path:path, public_url:pub.publicUrl, file_url:pub.publicUrl, thumbnail_url:f.thumbnail||pub.publicUrl, uploaded_by:'Celular / QR Code', uploaded_from:'mobile_qr', upload_token:token, notes, created_at:new Date().toISOString()};
-    const {error:dbErr}=await sb.from('evidence_files').insert(row); if(dbErr) throw dbErr;
-    sent++; bar.style.width=Math.round((sent/selectedFiles.length)*100)+'%';
+  const btn=document.getElementById('sendEvidenceBtn');
+  try{
+    const err=document.getElementById('mobileUploadError'); if(err) err.remove();
+    if(!selectedFiles.length){alert('Selecione pelo menos um arquivo.');return;}
+    if(!tokenRow || !tokenRow.token){throw new Error('Token inválido. Gere um novo QR Code no computador.');}
+    if(btn){btn.disabled=true; btn.textContent='Enviando...';}
+    setUploadStatus('Preparando envio...', 5);
+    const category=document.getElementById('category').value;
+    const notes=document.getElementById('notes').value||'';
+    const meta=tokenRow.metadata_json||{};
+    let sent=0;
+    for(const f of selectedFiles){
+      setUploadStatus('Enviando arquivo '+(sent+1)+' de '+selectedFiles.length+'...', Math.round((sent/selectedFiles.length)*70)+10);
+      const id=uid('ev');
+      const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,12);
+      const baseName=slug([meta.orderNumber||meta.returnCode||meta.transferCode||'evidencia',meta.sku||'',category,stamp].filter(Boolean).join('_'))+'.'+f.ext;
+      let folder='general';
+      if(tokenRow.return_id) folder=`returns/${tokenRow.return_id}`;
+      if(tokenRow.return_item_id) folder+=`/items/${tokenRow.return_item_id}`;
+      if(tokenRow.transfer_id) folder=`transfers/${tokenRow.transfer_id}`;
+      if(tokenRow.returned_stock_id) folder=`stock/${tokenRow.returned_stock_id}`;
+      const path=`${folder}/mobile/${id}-${baseName}`;
+      const uploadRes=await sb.storage.from('evidencias').upload(path,f.uploadBlob,{contentType:f.mime,upsert:true});
+      if(uploadRes.error) throw new Error('Storage: '+uploadRes.error.message);
+      const {data:pub}=sb.storage.from('evidencias').getPublicUrl(path);
+      const row={
+        id,
+        app_state_id:'decolab-main',
+        context_type:tokenRow.context_type||'',
+        context_id:tokenRow.context_id||'',
+        return_id:tokenRow.return_id||null,
+        return_item_id:tokenRow.return_item_id||null,
+        returned_stock_id:tokenRow.returned_stock_id||null,
+        transfer_id:tokenRow.transfer_id||null,
+        movement_id:tokenRow.movement_id||null,
+        category,
+        evidence_type:category,
+        file_name:baseName,
+        original_name:f.file.name,
+        mime_type:f.mime,
+        file_size:f.finalSize,
+        storage_bucket:'evidencias',
+        storage_path:path,
+        public_url:pub.publicUrl,
+        file_url:pub.publicUrl,
+        thumbnail_url:f.thumbnail||pub.publicUrl,
+        uploaded_by:'Celular / QR Code',
+        uploaded_from:'mobile_qr',
+        upload_token:token,
+        notes,
+        created_at:new Date().toISOString()
+      };
+      setUploadStatus('Registrando evidência no banco...', Math.round((sent/selectedFiles.length)*70)+25);
+      const dbRes=await sb.from('evidence_files').insert(row);
+      if(dbRes.error) throw new Error('Banco de dados: '+dbRes.error.message);
+      sent++;
+      setUploadStatus('Arquivo enviado com sucesso.', Math.round((sent/selectedFiles.length)*90)+5);
+    }
+    const nextCount=Number(tokenRow.upload_count||0)+sent;
+    const upd=await sb.from('qr_upload_tokens').update({used_at:new Date().toISOString(), upload_count:nextCount, status: nextCount>=Number(tokenRow.max_uploads||20)?'used':'active'}).eq('token',token);
+    if(upd.error) throw new Error('Atualização do token: '+upd.error.message);
+    document.getElementById('app').innerHTML=`<div class="card"><div class="alert ok"><strong>Envio concluído.</strong><br>${sent} evidência(s) enviada(s) com sucesso.</div><p class="hint">Você já pode voltar ao computador. A evidência aparecerá automaticamente no app.</p></div>`;
+  }catch(e){
+    console.error(e);
+    showMobileError(e.message||String(e));
+    setUploadStatus('Envio interrompido.', 100);
+  }finally{
+    if(btn){btn.disabled=false; btn.textContent='Enviar evidência';}
   }
-  await sb.from('qr_upload_tokens').update({used_at:new Date().toISOString(), upload_count:(Number(tokenRow.upload_count||0)+sent), status:(Number(tokenRow.upload_count||0)+sent)>=Number(tokenRow.max_uploads||20)?'used':'active'}).eq('token',token);
-  document.getElementById('app').innerHTML=`<div class="card"><div class="alert ok"><strong>Envio concluído.</strong><br>${sent} evidência(s) enviada(s) com sucesso.</div><p class="hint">Você já pode voltar ao computador. A evidência aparecerá automaticamente no app.</p></div>`;
 }
 init();
 </script>
