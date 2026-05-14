@@ -765,6 +765,11 @@ function renderDashboard(){
   `;
 }
 
+
+function metric(label, value, caption, icon='•'){
+  return metricCard(label, value, caption, icon);
+}
+
 function metricCard(label, value, caption, icon){
   return `
     <div class="card metric">
