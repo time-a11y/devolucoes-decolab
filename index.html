@@ -2206,11 +2206,15 @@ function startQrPolling(token){
     const status = document.getElementById('qrStatus');
     if(status){
       if(res.error) status.innerHTML = `<span class="sync-pill err">Erro ao consultar: ${esc(res.error)}</span>`;
-      else if(after > before || (res.data||[]).length) status.innerHTML = `<span class="sync-pill ok">Evidência recebida com sucesso. Atualizando tela...</span>`;
+      else if(after > before || (res.data||[]).length) status.innerHTML = `<span class="sync-pill ok">Evidência recebida com sucesso. Esta janela fechará automaticamente...</span>`;
       else status.innerHTML = `<span class="sync-pill">Aguardando envio pelo celular...</span>`;
     }
     if(after > before){
-      setTimeout(()=>render(), 800);
+      if(qrPollingTimer){ clearInterval(qrPollingTimer); qrPollingTimer = null; }
+      setTimeout(()=>{
+        closeModal();
+        fetchSupabaseEvidences({rerender:false}).finally(()=>render());
+      }, 1200);
     }
   };
   tick();
