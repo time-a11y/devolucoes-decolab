@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Upload de Evidência - Decolab</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    :root{--bg:#f4f7fb;--card:#fff;--text:#0f172a;--muted:#64748b;--line:#dbe4f0;--primary:#2563eb;--danger:#dc2626;--ok:#16a34a;--shadow:0 14px 35px rgba(15,23,42,.12)}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#eaf2ff,#f8fafc);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--text)}
+    .wrap{max-width:680px;margin:0 auto;padding:20px}.brand{display:flex;align-items:center;gap:12px;margin:10px 0 18px}.logo{width:44px;height:44px;border-radius:14px;background:#0f172a;color:#fff;display:grid;place-items:center;font-weight:900}.brand h1{font-size:22px;margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:var(--shadow);margin-bottom:14px}.context{display:grid;gap:8px}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #eef2f7;padding:8px 0}.row:last-child{border-bottom:0}.row span{color:var(--muted)}label{display:block;font-size:13px;font-weight:800;margin:12px 0 6px}select,input,textarea{width:100%;border:1px solid var(--line);border-radius:14px;padding:13px;background:#fff;font:inherit}textarea{min-height:90px}.actions{display:grid;gap:10px;margin-top:14px}.btn{border:0;border-radius:16px;padding:14px 16px;font-weight:900;font-size:15px;cursor:pointer;background:#e2e8f0;color:#0f172a;text-align:center}.btn.primary{background:var(--primary);color:#fff}.btn.danger{background:#fee2e2;color:#991b1b}.hint{color:var(--muted);font-size:13px;line-height:1.4}.preview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.file{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#f8fafc}.file img{width:100%;height:130px;object-fit:cover;display:block}.file .body{padding:10px;font-size:12px}.alert{border-radius:16px;padding:12px 14px;margin:12px 0;font-size:14px}.alert.ok{background:#dcfce7;color:#166534}.alert.err{background:#fee2e2;color:#991b1b}.progress{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden;margin-top:10px}.progress div{height:100%;width:0%;background:var(--primary);transition:.2s}.hidden{display:none}.icon{height:130px;display:grid;place-items:center;font-size:34px;background:#eef2ff;color:#1d4ed8}@media(max-width:560px){.wrap{padding:14px}.preview{grid-template-columns:1fr}.brand h1{font-size:19px}.card{border-radius:18px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand"><div class="logo">D</div><div><h1>Enviar evidência</h1><p>Upload via QR Code · Decolab</p></div></div>
+    <div id="app"><div class="card"><p>Carregando token...</p></div></div>
+  </div>
+<script>
+const SB_URL = 'https://wiehiqiuojcwcrnikiqs.supabase.co';
+const SB_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndpZWhpcWl1b2pjd2NybmlraXFzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NjMyMTMsImV4cCI6MjA5NDMzOTIxM30.BFdyC9R39D8KkMTUe6_MAxjuvs8igNhj9FT87d1Ilj8';
+const sb = window.supabase.createClient(SB_URL, SB_ANON_KEY);
+const token = new URLSearchParams(location.search).get('token') || '';
+const CATEGORIES = ['Produto recebido','Produto avariado','Produto usado','Produto quebrado','Produto divergente','Embalagem','Etiqueta de transporte','XML','Nota fiscal','Vídeo de abertura','Quarentena','Reparo','Reembalagem','Descarte','Transferência','Contestação','Aprovação','Auditoria','Comprovante','Documento interno'];
+let tokenRow = null;
+let selectedFiles = [];
+
+function esc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function uid(prefix='ev'){return prefix+'-'+Math.random().toString(36).slice(2,10)+Date.now().toString(36)}
+function bytes(n){n=Number(n||0); if(n<1024)return n+' B'; if(n<1048576)return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'}
+function slug(v){return String(v||'arquivo').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9._-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').slice(0,90)}
+function isImage(file){return (file.type||'').startsWith('image/')}
+function extFrom(file){return (file.name.split('.').pop()||'bin').toLowerCase()}
+async function dataUrl(file){return await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});}
+function loadImg(src){return new Promise((res,rej)=>{const img=new Image();img.onload=()=>res(img);img.onerror=rej;img.src=src;});}
+async function compressImage(file,maxW=1600,quality=.76){
+  const original=await dataUrl(file); const img=await loadImg(original); const scale=Math.min(1,maxW/img.width); const w=Math.round(img.width*scale); const h=Math.round(img.height*scale);
+  const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h; const ctx=canvas.getContext('2d'); ctx.drawImage(img,0,0,w,h); const main=canvas.toDataURL('image/jpeg',quality);
+  const tscale=Math.min(1,360/w); const tw=Math.round(w*tscale); const th=Math.round(h*tscale); const tc=document.createElement('canvas'); tc.width=tw; tc.height=th; tc.getContext('2d').drawImage(canvas,0,0,tw,th); const thumb=tc.toDataURL('image/jpeg',.7);
+  const blob=await (await fetch(main)).blob();
+  return {blob, dataUrl:main, thumbnail:thumb, size:blob.size, compressed:true};
+}
+async function filePreviewObj(file){
+  if(file.size > 20*1024*1024) throw new Error(file.name+' excede 20 MB.');
+  const allowed = ['image/','video/','application/pdf','application/xml','text/xml','text/csv','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
+  if(!allowed.some(a=>(file.type||'').startsWith(a) || (file.type||'')===a) && !/\.(xml|csv|xlsx)$/i.test(file.name)) throw new Error(file.name+' possui tipo não permitido.');
+  if(isImage(file)){
+    const c=await compressImage(file); return {file, uploadBlob:c.blob, preview:c.dataUrl, thumbnail:c.thumbnail, originalSize:file.size, finalSize:c.size, compressed:true, mime:'image/jpeg', ext:'jpg'};
+  }
+  return {file, uploadBlob:file, preview:'', thumbnail:'', originalSize:file.size, finalSize:file.size, compressed:false, mime:file.type||'application/octet-stream', ext:extFrom(file)};
+}
+function render(){
+  const app=document.getElementById('app');
+  if(!token){app.innerHTML='<div class="card"><div class="alert err">Token ausente. Escaneie novamente o QR Code.</div></div>';return;}
+  if(!tokenRow){app.innerHTML='<div class="card"><p>Validando token...</p></div>';return;}
+  const meta=tokenRow.metadata_json||{};
+  const expired=new Date(tokenRow.expires_at).getTime()<Date.now() || tokenRow.status!=='active';
+  app.innerHTML = `<div class="card"><h2 style="margin-top:0">Contexto da evidência</h2><div class="context"><div class="row"><strong>Devolução</strong><span>${esc(meta.returnCode||'-')}</span></div><div class="row"><strong>Pedido</strong><span>${esc(meta.orderNumber||'-')}</span></div><div class="row"><strong>SKU</strong><span>${esc(meta.sku||'-')}</span></div><div class="row"><strong>Produto</strong><span>${esc(meta.product||meta.transferCode||'-')}</span></div><div class="row"><strong>Validade</strong><span>${new Date(tokenRow.expires_at).toLocaleString('pt-BR')}</span></div></div>${expired?'<div class="alert err">Token expirado ou inativo. Gere um novo QR Code no computador.</div>':''}</div>${expired?'':`<div class="card"><label>Categoria</label><select id="category">${CATEGORIES.map(c=>`<option ${c===(tokenRow.category||meta.category)?'selected':''}>${c}</option>`).join('')}</select><label>Observação</label><textarea id="notes" placeholder="Ex.: foto dos dois produtos recebidos, avaria na embalagem..."></textarea><div class="actions"><label class="btn primary"><input id="camera" type="file" accept="image/*" capture="environment" style="display:none">Capturar foto</label><label class="btn"><input id="gallery" type="file" multiple accept="image/*,video/*,.pdf,.xml,.csv,.xlsx" style="display:none">Selecionar da galeria</label></div><div id="preview" class="preview"></div><div class="progress hidden" id="progress"><div></div></div><button class="btn primary" style="width:100%;margin-top:14px" onclick="sendFiles()">Enviar evidência</button><p class="hint">Imagens serão comprimidas automaticamente antes do envio.</p></div>`}`;
+  if(!expired){document.getElementById('camera').onchange=e=>addFiles(e.target.files);document.getElementById('gallery').onchange=e=>addFiles(e.target.files);drawPreview();}
+}
+async function init(){
+  try{
+    const {data,error}=await sb.from('qr_upload_tokens').select('*').eq('token',token).single();
+    if(error) throw error; tokenRow=data; render();
+  }catch(e){document.getElementById('app').innerHTML='<div class="card"><div class="alert err">Token inválido ou indisponível: '+esc(e.message||e)+'</div></div>';}
+}
+async function addFiles(fileList){
+  const files=Array.from(fileList||[]); if(!files.length)return;
+  if(selectedFiles.length + files.length > Number(tokenRow.max_uploads||20)){alert('Limite de arquivos atingido.');return;}
+  for(const f of files){try{selectedFiles.push(await filePreviewObj(f));}catch(e){alert(e.message||e);}}
+  drawPreview();
+}
+function drawPreview(){
+  const el=document.getElementById('preview'); if(!el)return;
+  el.innerHTML=selectedFiles.map((f,i)=>`<div class="file">${f.preview?`<img src="${f.thumbnail||f.preview}">`:`<div class="icon">${f.mime.includes('pdf')?'PDF':f.mime.includes('video')?'VID':'DOC'}</div>`}<div class="body"><strong>${esc(f.file.name)}</strong><br>${bytes(f.originalSize)} → ${bytes(f.finalSize)}<br>${f.compressed?'Comprimida':'Original'}<br><button class="btn danger" style="padding:8px;margin-top:8px;width:100%" onclick="selectedFiles.splice(${i},1);drawPreview()">Remover</button></div></div>`).join('');
+}
+async function sendFiles(){
+  if(!selectedFiles.length){alert('Selecione pelo menos um arquivo.');return;}
+  const p=document.getElementById('progress'); const bar=p.querySelector('div'); p.classList.remove('hidden'); bar.style.width='0%';
+  const category=document.getElementById('category').value; const notes=document.getElementById('notes').value||''; const meta=tokenRow.metadata_json||{};
+  let sent=0;
+  for(const f of selectedFiles){
+    const id=uid('ev'); const stamp=new Date().toISOString().replace(/[-:T]/g,'').slice(0,12); const baseName=slug([meta.orderNumber||meta.returnCode||meta.transferCode||'evidencia',meta.sku||'',category,stamp].filter(Boolean).join('_'))+'.'+f.ext;
+    let folder='general'; if(tokenRow.return_id) folder=`returns/${tokenRow.return_id}`; if(tokenRow.return_item_id) folder+=`/items/${tokenRow.return_item_id}`; if(tokenRow.transfer_id) folder=`transfers/${tokenRow.transfer_id}`; if(tokenRow.returned_stock_id) folder=`stock/${tokenRow.returned_stock_id}`;
+    const path=`${folder}/mobile/${id}-${baseName}`;
+    const {error:upErr}=await sb.storage.from('evidencias').upload(path,f.uploadBlob,{contentType:f.mime,upsert:false}); if(upErr) throw upErr;
+    const {data:pub}=sb.storage.from('evidencias').getPublicUrl(path);
+    const row={id, context_type:tokenRow.context_type, context_id:tokenRow.context_id, return_id:tokenRow.return_id, return_item_id:tokenRow.return_item_id, returned_stock_id:tokenRow.returned_stock_id, transfer_id:tokenRow.transfer_id, movement_id:tokenRow.movement_id, category, evidence_type:category, file_name:baseName, original_name:f.file.name, mime_type:f.mime, file_size:f.finalSize, storage_bucket:'evidencias', storage_path:path, public_url:pub.publicUrl, file_url:pub.publicUrl, thumbnail_url:f.thumbnail||pub.publicUrl, uploaded_by:'Celular / QR Code', uploaded_from:'mobile_qr', upload_token:token, notes, created_at:new Date().toISOString()};
+    const {error:dbErr}=await sb.from('evidence_files').insert(row); if(dbErr) throw dbErr;
+    sent++; bar.style.width=Math.round((sent/selectedFiles.length)*100)+'%';
+  }
+  await sb.from('qr_upload_tokens').update({used_at:new Date().toISOString(), upload_count:(Number(tokenRow.upload_count||0)+sent), status:(Number(tokenRow.upload_count||0)+sent)>=Number(tokenRow.max_uploads||20)?'used':'active'}).eq('token',token);
+  document.getElementById('app').innerHTML=`<div class="card"><div class="alert ok"><strong>Envio concluído.</strong><br>${sent} evidência(s) enviada(s) com sucesso.</div><p class="hint">Você já pode voltar ao computador. A evidência aparecerá automaticamente no app.</p></div>`;
+}
+init();
+</script>
+</body>
+</html>
