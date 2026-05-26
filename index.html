@@ -223,6 +223,37 @@
       border:1px solid var(--line);border-radius:12px;padding:10px;background:#f8fafc;min-width:150px;max-width:220px;
     }
     .evidence img{width:100%;max-height:110px;object-fit:cover;border-radius:10px;margin-top:8px}
+    .evidence-gallery{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+      gap:16px;
+      align-items:stretch;
+    }
+    .evidence-thumb{
+      border:1px solid var(--line);
+      border-radius:18px;
+      background:#fff;
+      overflow:hidden;
+      box-shadow:0 10px 24px rgba(15,23,42,.06);
+      cursor:pointer;
+      transition:.18s ease;
+      display:flex;
+      flex-direction:column;
+      min-height:260px;
+    }
+    .evidence-thumb:hover{transform:translateY(-2px);box-shadow:0 16px 34px rgba(15,23,42,.10)}
+    .evidence-thumb img{
+      width:100%;
+      height:160px;
+      max-height:160px;
+      object-fit:cover;
+      display:block;
+      background:#f8fafc;
+    }
+    .evidence-thumb-body{padding:12px;display:grid;gap:6px;flex:1}
+    .evidence-thumb-title{font-weight:850;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .evidence-thumb-meta{font-size:12px;color:var(--muted);line-height:1.45}
+    .file-icon{height:160px;background:#f1f5f9;display:grid;place-items:center;font-weight:900;color:#475569;text-transform:uppercase;font-size:20px}
     .empty{
       border:1px dashed #cbd5e1;background:#f8fafc;color:#64748b;border-radius:18px;padding:30px;text-align:center;
     }
@@ -2372,8 +2403,9 @@ function cancelTransfer(id){ const t=(state.transfers||[]).find(x=>x.id===id); i
 function exportTransfersCsv(){ const rows=[['Codigo','Tipo','Destino','Endereco','Qtd','Valor','Status','Criada em','Enviada em','Recebida em']]; (state.transfers||[]).forEach(t=>rows.push([t.code,t.type,t.destination_name,t.destination_address,t.total_quantity,t.total_value,t.status,brDate(t.created_at),brDate(t.shipped_at),brDate(t.received_at)])); download('transferencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
 
 function renderEvidenceCenter(){
-  const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
-  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-grid" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+  const all=[];
+  state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>{const src=e.preview||e.thumbnail_url||e.file_url||e.public_url||''; const isImage=String(e.type||e.mime_type||'').startsWith('image') || !!src; const ext=(e.name||e.original_name||e.file_name||'Arquivo').split('.').pop()||'file'; return `<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${isImage&&src?`<img src="${esc(src)}" alt="${esc(e.name||'Evidência')}" loading="lazy">`:`<div class="file-icon">${esc(ext)}</div>`}<div class="evidence-thumb-body"><div class="evidence-thumb-title">${esc(e.category||'Evidência')}</div><div class="evidence-thumb-meta">${esc(e.returnCode)} · ${esc(e.sku)}<br>${esc(e.product||'')}<br>${brDate(e.uploadedAt)}</div></div></div>`}).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
 }
 function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=e.preview||e.file_url||e.thumbnail_url||''; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${url?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc">`:empty('Arquivo sem preview.')}<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
 function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
