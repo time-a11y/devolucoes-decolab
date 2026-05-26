@@ -308,7 +308,6 @@ const DEST_COLOR = {
   'Descarte':'red',
   'Troca':'blue',
   'Reparo/Reembalagem':'yellow',
-  'Reetiquetagem':'blue',
   'Análise manual':'gray',
   'Contestação':'purple'
 };
@@ -432,19 +431,90 @@ function loadState(){
   return structuredClone(initialState);
 }
 
-function save(){
-  localStorage.setItem(APP_KEY, JSON.stringify({
+function buildPersistableState(){
+  return {
     users: state.users,
     session: state.session,
     route: state.route,
     currentReturnId: state.currentReturnId,
-    returns: state.returns,
+    returns: sanitizeReturnsForStorage(state.returns),
     audit: state.audit,
     rules: state.rules,
     filters: state.filters,
     warehouses: state.warehouses,
     transfers: state.transfers
+  };
+}
+
+function isBase64DataUrl(value){
+  return typeof value === 'string' && value.startsWith('data:');
+}
+
+function sanitizeEvidenceForStorage(ev){
+  const clean = {...ev};
+  if(isBase64DataUrl(clean.preview)){
+    clean.preview_removed_from_local_storage = true;
+    clean.preview_size_removed = clean.preview.length;
+    clean.preview = '';
+  }
+  if(isBase64DataUrl(clean.file_url)) clean.file_url = '';
+  if(isBase64DataUrl(clean.thumbnail_url)) clean.thumbnail_url = '';
+  if(isBase64DataUrl(clean.public_url)) clean.public_url = '';
+  if(isBase64DataUrl(clean.url)) clean.url = '';
+  return clean;
+}
+
+function sanitizeReturnsForStorage(returns){
+  return (returns || []).map(ret => ({
+    ...ret,
+    items: (ret.items || []).map(item => ({
+      ...item,
+      evidences: (item.evidences || []).map(sanitizeEvidenceForStorage)
+    })),
+    evidence: (ret.evidence || []).map(sanitizeEvidenceForStorage)
   }));
+}
+
+function stripLocalImageCacheFromState(){
+  let removed = 0;
+  (state.returns || []).forEach(ret => {
+    (ret.items || []).forEach(item => {
+      (item.evidences || []).forEach(ev => {
+        ['preview','file_url','thumbnail_url','public_url','url'].forEach(k => {
+          if(isBase64DataUrl(ev[k])){
+            removed += ev[k].length;
+            ev[k] = '';
+            ev.preview_removed_from_local_storage = true;
+          }
+        });
+      });
+    });
+    (ret.evidence || []).forEach(ev => {
+      ['preview','file_url','thumbnail_url','public_url','url'].forEach(k => {
+        if(isBase64DataUrl(ev[k])){
+          removed += ev[k].length;
+          ev[k] = '';
+          ev.preview_removed_from_local_storage = true;
+        }
+      });
+    });
+  });
+  return removed;
+}
+
+function save(){
+  const payload = buildPersistableState();
+  try{
+    localStorage.setItem(APP_KEY, JSON.stringify(payload));
+  }catch(e){
+    if(e && (e.name === 'QuotaExceededError' || String(e.message || '').toLowerCase().includes('quota'))){
+      stripLocalImageCacheFromState();
+      localStorage.setItem(APP_KEY, JSON.stringify(buildPersistableState()));
+      console.warn('Cache local de imagens foi removido automaticamente para liberar espaço.');
+    }else{
+      throw e;
+    }
+  }
 }
 
 function uid(prefix='id'){
@@ -1313,7 +1383,7 @@ function renderItemsTable(ret, editable=true){
 }
 
 function renderConferenceStatusSelect(retId,item){
-  const opts = ['Pendente','Produto recebido corretamente','Produto recebido parcialmente','Produto não recebido','Produto diferente do esperado','Produto físico divergente recebido','Produto com avaria','Produto sem embalagem','Produto usado','Produto incompleto','Produto com acessórios faltantes'];
+  const opts = ['Pendente','Produto recebido corretamente','Produto recebido parcialmente','Produto não recebido','Produto diferente do esperado','Produto com avaria','Produto sem embalagem','Produto usado','Produto incompleto','Produto com acessórios faltantes'];
   return `<select onchange="updateItem('${retId}','${item.id}','conferenceStatus',this.value)">${opts.map(o=>`<option ${item.conferenceStatus===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
 }
 
@@ -1475,12 +1545,9 @@ function renderInspectionItem(ret,item){
           <div class="split">
             <div>
               <strong>${esc(item.description)}</strong><br>
-              <span class="hint">${esc(item.sku)} · EAN ${esc(item.ean || '-')} · Qtd recebida ${esc(item.receivedQty || '0')}/${esc(item.expectedQty)}${item.isPhysicalDivergent ? ' · item físico divergente' : ''}</span>
+              <span class="hint">${esc(item.sku)} · EAN ${esc(item.ean || '-')} · Qtd recebida ${esc(item.receivedQty || '0')}/${esc(item.expectedQty)}</span>
             </div>
-            <div class="row-actions">
-              ${destBadge(item.destination)}
-              <button type="button" class="btn warning small" onclick="openPhysicalMismatchModal('${ret.id}','${item.id}')">Produto físico diferente</button>
-            </div>
+            ${destBadge(item.destination)}
           </div>
         </div>
       </div>
@@ -1553,29 +1620,98 @@ function handleEvidenceUpload(input, retId, itemId){
     const ev = {
       id: uid('ev'),
       name: file.name,
+      original_name: file.name,
       type: file.type || 'arquivo',
+      mime_type: file.type || 'arquivo',
       size: file.size,
+      file_size: file.size,
       uploadedBy: state.session.name,
       uploadedAt: nowIso(),
-      preview: ''
+      category: 'Upload local',
+      uploaded_from: 'desktop_upload',
+      preview: '',
+      file_url: '',
+      storage_path: ''
     };
-    const reader = new FileReader();
-    reader.onload = function(){
-      if(file.type.startsWith('image/') && file.size < 900000){
-        ev.preview = String(reader.result || '');
-      }
-      item.evidences.push(ev);
-      addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
+    item.evidences = item.evidences || [];
+    item.evidences.push(ev);
+    addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
+
+    if(file.type.startsWith('image/') && file.size < 900000){
+      const reader = new FileReader();
+      reader.onload = function(){
+        ev.preview = String(reader.result || ''); // preview apenas em memória; não é salvo no localStorage
+        save();
+        render();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    uploadLocalEvidenceToSupabase(file, ret, item, ev).finally(() => {
       pending--;
       if(pending === 0) render();
-    };
-    reader.onerror = function(){
-      item.evidences.push(ev);
-      pending--;
-      if(pending === 0) render();
-    };
-    reader.readAsDataURL(file);
+    });
   });
+  save();
+  render();
+}
+
+function safeFileName(name){
+  return String(name || 'arquivo')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-zA-Z0-9._-]+/g,'-')
+    .replace(/-+/g,'-')
+    .slice(0,120);
+}
+
+async function uploadLocalEvidenceToSupabase(file, ret, item, ev){
+  const sb = getSupabaseClient();
+  if(!sb || !file){
+    ev.storage_status = 'local_metadata_only';
+    return;
+  }
+  try{
+    const path = `returns/${ret.id}/items/${item.id}/desktop/${Date.now()}-${safeFileName(file.name)}`;
+    const {error: uploadError} = await sb.storage.from('evidencias').upload(path, file, {cacheControl:'3600', upsert:false, contentType:file.type || undefined});
+    if(uploadError) throw uploadError;
+    const {data: publicData} = sb.storage.from('evidencias').getPublicUrl(path);
+    ev.storage_path = path;
+    ev.file_url = publicData?.publicUrl || '';
+    ev.public_url = ev.file_url;
+    ev.storage_status = 'uploaded_to_supabase';
+
+    const dbPayload = {
+      return_id: ret.id,
+      return_item_id: item.id,
+      category: ev.category || 'Upload local',
+      evidence_type: ev.category || 'Upload local',
+      file_name: path.split('/').pop(),
+      original_name: file.name,
+      mime_type: file.type || 'arquivo',
+      file_size: file.size,
+      storage_bucket: 'evidencias',
+      storage_path: path,
+      file_url: ev.file_url,
+      thumbnail_url: ev.file_url,
+      uploaded_by: currentUserName(),
+      uploaded_from: 'desktop_upload',
+      notes: 'Upload realizado pelo computador no app principal.',
+      created_at: nowIso()
+    };
+    const {data, error: insertError} = await sb.from('evidence_files').insert(dbPayload).select('id').limit(1);
+    if(!insertError && data && data[0]?.id){
+      ev.supabase_id = data[0].id;
+    }else if(insertError){
+      console.warn('Arquivo salvo no Storage, mas não foi possível registrar em evidence_files:', insertError.message);
+    }
+    addReturnAudit(ret, 'Evidência enviada ao Supabase Storage', `${file.name} no SKU ${item.sku}`);
+    save();
+  }catch(e){
+    ev.storage_status = 'upload_failed';
+    ev.storage_error = e.message || String(e);
+    console.warn('Falha ao enviar evidência para Supabase:', e.message || e);
+    save();
+  }
 }
 
 function renderEvidence(list){
@@ -1583,10 +1719,12 @@ function renderEvidence(list){
   return `<div class="evidence-grid">${list.map(ev => {
     const src = ev.preview || ev.thumbnail_url || ev.file_url || ev.public_url || ev.url || '';
     const isImg = src && String(ev.type || ev.mime_type || '').startsWith('image/');
+    const origin = ev.uploaded_from==='mobile_qr' ? '· QR Code' : ev.uploaded_from==='desktop_upload' ? '· Desktop' : '';
+    const status = ev.storage_status === 'uploaded_to_supabase' ? ' · Storage OK' : ev.storage_status === 'upload_failed' ? ' · Falha no Storage' : ev.preview_removed_from_local_storage ? ' · Cache local limpo' : '';
     return `<div class="evidence">
       <strong>${esc(ev.name || ev.original_name || ev.file_name || 'Evidência')}</strong><br>
-      <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${ev.uploaded_from==='mobile_qr'?'· QR Code':''}</span>
-      ${isImg ? `<img src="${esc(src)}" alt="Evidência">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : '')}
+      <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${origin}${status}</span>
+      ${isImg ? `<img src="${esc(src)}" alt="Evidência">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : '<p class="hint">Arquivo registrado. Preview local não armazenado para economizar espaço.</p>')}
     </div>`;
   }).join('')}</div>`;
 }
@@ -1617,10 +1755,6 @@ function decideDestination(item){
   const packAction = (item.packageAction || '').toLowerCase();
   const received = Number(item.receivedQty || 0);
   const expected = Number(item.expectedQty || 0);
-
-  if(item.isPhysicalDivergent || item.needsRelabeling){
-    return {destination:'Reetiquetagem', reason:'Produto físico não corresponde à NF-e/etiqueta original e exige reetiquetagem antes de qualquer novo destino.'};
-  }
 
   if(status.includes('diferente') || status.includes('não recebido') || received < expected){
     return {destination:'Contestação', reason:'Produto ausente, divergente ou quantidade recebida inferior ao esperado.'};
@@ -1675,7 +1809,7 @@ function renderDestination(ret){
 }
 
 function renderDestinationItem(ret,item){
-  const options = ['Reabastecimento','Quarentena','Descarte','Troca','Reparo/Reembalagem','Reetiquetagem','Análise manual','Contestação'];
+  const options = ['Reabastecimento','Quarentena','Descarte','Troca','Reparo/Reembalagem','Análise manual','Contestação'];
   const needsEvidence = ['Descarte','Contestação','Quarentena'].includes(item.destination);
   const evidenceOk = !needsEvidence || (item.evidences || []).length >= Number(state.rules.minCriticalPhotos || 1);
   return `
@@ -2063,132 +2197,6 @@ function saveEditedReturn(event, retId){
 }
 
 
-
-function openPhysicalMismatchModal(retId,itemId){
-  const ret = getReturn(retId);
-  const item = ret?.items.find(i => i.id === itemId);
-  if(!ret || !item) return;
-  const html = `
-    <div class="modal-backdrop" id="modal">
-      <div class="modal" style="max-width:960px">
-        <div class="modal-header">
-          <div>
-            <h2>Produto físico diferente da NF-e/etiqueta</h2>
-            <p>Use quando a nota e a etiqueta estão corretas, mas o item dentro do pacote é outro produto.</p>
-          </div>
-          <button class="btn ghost" onclick="closeModal()">Fechar</button>
-        </div>
-        <div class="alert critica" style="margin-bottom:16px">
-          <strong>!</strong>
-          <div>
-            O item fiscal <strong>${esc(item.sku)}</strong> será marcado com quantidade física recebida igual a <strong>0</strong>. Em seguida, será criado um novo item físico divergente para reetiquetagem, quarentena e análise.
-          </div>
-        </div>
-        <form onsubmit="savePhysicalMismatch(event,'${ret.id}','${item.id}')">
-          <h3>Item esperado na NF-e / etiqueta</h3>
-          <div class="grid cols-2">
-            <div><span class="hint">SKU esperado</span><br><strong>${esc(item.sku || '-')}</strong></div>
-            <div><span class="hint">Produto esperado</span><br><strong>${esc(item.description || '-')}</strong></div>
-            <div><span class="hint">Qtd esperada</span><br><strong>${num(item.expectedQty || 0)}</strong></div>
-            <div><span class="hint">Etiqueta/NF-e</span><br><strong>${esc(ret.invoice?.number || '-')}</strong></div>
-          </div>
-          <h3 style="margin-top:18px">Produto físico recebido</h3>
-          <div class="form-grid two">
-            <div class="field"><label>SKU físico recebido</label><input name="physicalSku" placeholder="Ex.: TENIS-PRETO-42" required></div>
-            <div class="field"><label>EAN físico recebido</label><input name="physicalEan" placeholder="Código de barras, se houver"></div>
-            <div class="field" style="grid-column:1/-1"><label>Descrição do produto físico</label><input name="physicalDescription" placeholder="Ex.: Tênis preto tamanho 42" required></div>
-            <div class="field"><label>Quantidade física recebida</label><input name="physicalQty" type="number" min="0.0001" step="0.0001" value="1" required></div>
-            <div class="field"><label>Valor estimado unitário</label><input name="physicalUnitValue" type="number" min="0" step="0.01" value="${esc(item.unitValue || 0)}"></div>
-            <div class="field"><label>Unidade</label><input name="physicalUnit" value="${esc(item.unit || 'UN')}"></div>
-            <div class="field"><label>Condição física inicial</label><select name="physicalCondition"><option>Produto intacto</option><option>Produto com sinais de uso</option><option>Produto avariado</option><option>Produto sem condições de revenda</option></select></div>
-            <div class="field"><label>Condição da embalagem</label><select name="packageCondition"><option>Embalagem incompatível com o produto</option><option>Produto devolvido sem embalagem original</option><option>Embalagem original presente</option><option>Embalagem aberta, mas reaproveitável</option><option>Embalagem rasgada</option><option>Embalagem sem etiqueta</option></select></div>
-            <div class="field"><label>Destino operacional inicial</label><select name="destination"><option>Reetiquetagem</option><option>Quarentena</option><option>Contestação</option><option>Reparo/Reembalagem</option><option>Análise manual</option></select></div>
-            <div class="field"><label>Status de reetiquetagem</label><select name="relabelingStatus"><option>Reetiquetagem solicitada</option><option>Aguardando etiqueta</option><option>Etiqueta impressa</option><option>Reetiquetado</option></select></div>
-            <div class="field" style="grid-column:1/-1"><label>Motivo / observação obrigatória</label><textarea name="reason" required placeholder="Ex.: NF-e e etiqueta indicam camiseta azul, mas o produto físico recebido é um tênis."></textarea></div>
-          </div>
-          <div class="alert media" style="margin-top:8px">
-            <strong>i</strong>
-            <div>Após salvar, anexe evidências do produto físico divergente e da etiqueta original pelo botão de QR Code do novo item criado.</div>
-          </div>
-          <div class="row-actions" style="margin-top:18px">
-            <button type="button" class="btn" onclick="closeModal()">Cancelar</button>
-            <button type="submit" class="btn primary">Registrar divergência física e solicitar reetiquetagem</button>
-          </div>
-        </form>
-      </div>
-    </div>`;
-  document.body.insertAdjacentHTML('beforeend', html);
-}
-
-function savePhysicalMismatch(event, retId, expectedItemId){
-  event.preventDefault();
-  const ret = getReturn(retId);
-  const expected = ret?.items.find(i => i.id === expectedItemId);
-  if(!ret || !expected) return;
-  const f = new FormData(event.target);
-  const qty = Number(f.get('physicalQty') || 0);
-  if(qty <= 0){ alert('Informe uma quantidade física recebida maior que zero.'); return; }
-  const reason = String(f.get('reason') || '').trim();
-  if(!reason){ alert('Informe o motivo da divergência.'); return; }
-
-  expected.receivedQty = 0;
-  expected.conferenceStatus = 'Produto não recebido';
-  expected.physicalDivergenceNote = reason;
-  expected.destination = 'Contestação';
-  expected.destinationReason = 'Item previsto na NF-e/etiqueta não foi recebido fisicamente. O produto dentro do pacote é diferente.';
-  expected.requiresApproval = true;
-  expected.approvalStatus = '';
-
-  const unitValue = Number(f.get('physicalUnitValue') || 0);
-  const physicalItem = {
-    id: uid('itemfisico'),
-    invoiceItemId: expected.invoiceItemId || expected.id,
-    linkedExpectedItemId: expected.id,
-    isPhysicalDivergent: true,
-    needsRelabeling: true,
-    relabelingStatus: String(f.get('relabelingStatus') || 'Reetiquetagem solicitada'),
-    sku: String(f.get('physicalSku') || '').trim(),
-    ean: String(f.get('physicalEan') || '').trim(),
-    description: String(f.get('physicalDescription') || '').trim(),
-    ncm: '',
-    cfop: '',
-    unit: String(f.get('physicalUnit') || 'UN').trim() || 'UN',
-    image: '',
-    variation: '',
-    soldQty: 0,
-    expectedQty: 0,
-    receivedQty: qty,
-    unitValue,
-    totalValue: qty * unitValue,
-    conferenceStatus: 'Produto físico divergente recebido',
-    physicalCondition: String(f.get('physicalCondition') || ''),
-    packageCondition: String(f.get('packageCondition') || ''),
-    packageAction: 'Enviar para reembalagem',
-    severity: 'Alta',
-    notes: reason,
-    evidences: [],
-    destination: String(f.get('destination') || 'Reetiquetagem'),
-    destinationReason: 'Produto físico diferente da NF-e/etiqueta. Necessário reetiquetar antes de qualquer destinação.',
-    requiresApproval: true,
-    approvalStatus: '',
-    approvedBy: '',
-    approvedAt: '',
-    createdFromPhysicalMismatch: true,
-    createdAt: nowIso()
-  };
-
-  ret.items.push(physicalItem);
-  ret.alerts = dedupeAlerts([...(ret.alerts || []),
-    {level:'Crítica', message:`Produto físico divergente recebido: esperado ${expected.sku}, recebido ${physicalItem.sku}.`},
-    {level:'Média', message:`Reetiquetagem solicitada para o SKU físico ${physicalItem.sku}.`}
-  ]);
-  ret.status = 'Conferência com divergência';
-  ret.updatedAt = nowIso();
-  addReturnAudit(ret, 'Divergência física registrada', `NF/etiqueta: ${expected.sku} com qtd recebida 0. Produto físico recebido: ${physicalItem.sku} qtd ${qty}. Reetiquetagem solicitada.`);
-  closeModal();
-  render();
-}
-
 // =============================
 // Estoque devolvido, transferências e evidências
 // =============================
@@ -2469,6 +2477,8 @@ function renderSettings(){
           </table>
         </div>
         <div class="row-actions" style="margin-top:14px">
+          <button class="btn" onclick="optimizeLocalStorage()">Otimizar armazenamento local</button>
+          <button class="btn warning" onclick="showLocalStorageUsage()">Ver uso local</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
       </div>
@@ -2489,6 +2499,22 @@ function updateRule(key,value){
   state.rules[key] = value;
   addAudit('Regra de negócio alterada', 'configuração', key, String(value));
   save();
+}
+
+
+function optimizeLocalStorage(){
+  const removed = stripLocalImageCacheFromState();
+  save();
+  const kb = Math.round(removed / 1024);
+  addAudit('Armazenamento local otimizado', 'sistema', APP_KEY, `${kb} KB de previews/base64 removidos do cache local`);
+  alert(`Otimização concluída. ${kb} KB de cache local de imagens foram removidos. As devoluções, vínculos, auditoria e URLs do Supabase foram mantidos.`);
+  render();
+}
+
+function showLocalStorageUsage(){
+  const raw = localStorage.getItem(APP_KEY) || '';
+  const bytes = new Blob([raw]).size;
+  alert(`Uso atual do armazenamento local do app: aproximadamente ${Math.round(bytes/1024)} KB.\n\nAs imagens novas não serão mais salvas em base64 no localStorage; apenas metadados e links serão mantidos.`);
 }
 
 function resetApp(){
