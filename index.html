@@ -253,6 +253,25 @@
     .sync-pill.ok{background:#dcfce7;color:#166534}
     .sync-pill.err{background:#fee2e2;color:#991b1b}
     @media(max-width:720px){.qr-card{grid-template-columns:1fr}.qr-box{min-height:220px}}
+
+    .oper-tag-select{
+      width:auto;
+      min-width:150px;
+      padding:7px 10px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:850;
+      background:#eff6ff;
+      color:#1d4ed8;
+      border:1px solid #bfdbfe;
+    }
+    .mkt-remessa-box{
+      border:1px solid #bfdbfe;
+      background:#eff6ff;
+      border-radius:16px;
+      padding:14px;
+    }
+
     @media print{
       body{background:#fff}
       .sidebar,.topbar,.no-print,.btn,.tabs{display:none!important}
@@ -408,7 +427,7 @@ function ensureStateExtensions(){
   if(!state.filters.transferSearch) state.filters.transferSearch = '';
   if(!state.filters.transferTab) state.filters.transferTab = 'transfers';
   state.warehouses = state.warehouses || defaultWarehouses();
-  state.transfers = (state.transfers || []).map(t => ({...t, operation_tag: t.operation_tag || t.separation_status || 'packing', mkt_shipment_id: t.mkt_shipment_id || t.mktShipmentId || ''}));
+  state.transfers = (state.transfers || []).map(t => ({...t, operational_status: t.operational_status || 'packing', mkt_shipment_id: t.mkt_shipment_id || ''}));
   state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
 }
 
@@ -710,22 +729,6 @@ function statusBadge(status){
 
 function destBadge(dest){
   return `<span class="badge ${DEST_COLOR[dest] || 'gray'}">${esc(dest || 'Análise manual')}</span>`;
-}
-
-const TRANSFER_TAGS = ['packing','aguardando coleta','enviado'];
-const TRANSFER_TAG_COLOR = {
-  'packing':'yellow',
-  'aguardando coleta':'blue',
-  'enviado':'green'
-};
-
-function transferTagBadge(tag){
-  const value = tag || 'packing';
-  return `<span class="badge ${TRANSFER_TAG_COLOR[value] || 'gray'}">${esc(value)}</span>`;
-}
-
-function renderTransferTagSelect(id, value){
-  return `<select onchange="updateTransferOperationTag('${id}',this.value)">${TRANSFER_TAGS.map(t=>`<option ${value===t?'selected':''}>${esc(t)}</option>`).join('')}</select>`;
 }
 
 function renderDashboard(){
@@ -2024,10 +2027,13 @@ function renderTransfers(){
 function renderTransfersList(){
   const q=(state.filters.transferSearch||'').toLowerCase().trim();
   let list=state.transfers||[];
-  if(q) list=list.filter(t=>[t.code,t.type,t.destination_name,t.destination_address,t.status,t.created_by,t.mkt_shipment_id,t.operation_tag].join(' ').toLowerCase().includes(q));
+  if(q) list=list.filter(t=>[
+    t.code,t.type,t.destination_name,t.destination_address,t.status,t.created_by,
+    t.mkt_shipment_id,t.operational_status,t.carrier,t.tracking_code
+  ].join(' ').toLowerCase().includes(q));
   const totalQty=list.reduce((s,t)=>s+Number(t.total_quantity||0),0);
   const totalValue=list.reduce((s,t)=>s+Number(t.total_value||0),0);
-  return `<section class="grid cols-4" style="margin-top:18px">${metric('Transferências', list.length, 'Total criadas')}${metric('Quantidade', num(totalQty), 'Itens transferidos')}${metric('Valor', money(totalValue), 'Valor transferido')}${metric('Em trânsito', list.filter(t=>['Enviada','Em trânsito'].includes(t.status)).length, 'Aguardando recebimento')}</section><div class="field" style="margin-top:14px"><input placeholder="Buscar transferência, destino, status, SKU ou ID remessa MKT..." value="${esc(state.filters.transferSearch||'')}" oninput="state.filters.transferSearch=this.value; save(); render()"></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Código</th><th>Tipo / Destino</th><th>ID remessa MKT</th><th>Tag operacional</th><th>Qtd</th><th>Valor</th><th>Status</th><th>Datas</th><th>Ações</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(t.code)}</strong><br><span class="hint">${esc(t.document_number||'-')}</span></td><td>${esc(t.type)}<br><span class="hint">${esc(t.destination_name)} · ${esc(t.destination_address||'')}</span></td><td><strong>${esc(t.mkt_shipment_id||'-')}</strong></td><td>${renderTransferTagSelect(t.id,t.operation_tag||'packing')}</td><td>${num(t.total_quantity)}</td><td>${money(t.total_value)}</td><td>${statusBadge(t.status)}</td><td><span class="hint">Criada: ${brDate(t.created_at)}<br>Envio: ${brDate(t.shipped_at)}<br>Receb.: ${brDate(t.received_at)}</span></td><td><div class="row-actions"><button class="btn small" onclick="openTransferDetail('${t.id}')">Detalhe</button><button class="btn small" onclick="editMktShipment('${t.id}')">Editar remessa</button><button class="btn small" onclick="printTransferPackingList('${t.id}')">Romaneio PDF</button><button class="btn small" onclick="confirmTransferShipment('${t.id}')" ${['Enviada','Em trânsito','Recebida','Finalizada','Cancelada'].includes(t.status)?'disabled':''}>Confirmar envio</button><button class="btn small" onclick="confirmTransferReceipt('${t.id}')" ${!['Enviada','Em trânsito'].includes(t.status)?'disabled':''}>Receber</button><button class="btn danger small" onclick="cancelTransfer('${t.id}')" ${!['Rascunho','Pendente de envio'].includes(t.status)?'disabled':''}>Cancelar</button><button class="btn danger small" onclick="deleteTransferShipment('${t.id}')">Excluir remessa</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('Nenhuma transferência criada.')}`;
+  return `<section class="grid cols-4" style="margin-top:18px">${metric('Transferências', list.length, 'Total criadas')}${metric('Quantidade', num(totalQty), 'Itens transferidos')}${metric('Valor', money(totalValue), 'Valor transferido')}${metric('Em trânsito', list.filter(t=>['Enviada','Em trânsito'].includes(t.status)).length, 'Aguardando recebimento')}</section><div class="field" style="margin-top:14px"><input placeholder="Buscar transferência, destino, ID remessa MKT, status, rastreio..." value="${esc(state.filters.transferSearch||'')}" oninput="state.filters.transferSearch=this.value; save(); render()"></div>${list.length?`<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Código / Remessa</th><th>Tipo / Destino</th><th>Qtd</th><th>Valor</th><th>Status</th><th>Tag operacional</th><th>Datas</th><th>Ações</th></tr></thead><tbody>${list.map(t=>`<tr><td><strong>${esc(t.code)}</strong><br><span class="hint">MKT: ${esc(t.mkt_shipment_id || '-')}<br>Doc.: ${esc(t.document_number||'-')}</span></td><td>${esc(t.type)}<br><span class="hint">${esc(t.destination_name)} · ${esc(t.destination_address||'')}</span></td><td>${num(t.total_quantity)}</td><td>${money(t.total_value)}</td><td>${statusBadge(t.status)}</td><td>${transferTagControl(t)}</td><td><span class="hint">Criada: ${brDate(t.created_at)}<br>Envio: ${brDate(t.shipped_at)}<br>Receb.: ${brDate(t.received_at)}</span></td><td><div class="row-actions"><button class="btn small" onclick="openTransferDetail('${t.id}')">Detalhe</button><button class="btn small" onclick="openEditTransferModal('${t.id}')">Editar remessa</button><button class="btn small" onclick="printTransferPackingList('${t.id}')">Romaneio PDF</button><button class="btn small" onclick="confirmTransferShipment('${t.id}')" ${['Enviada','Em trânsito','Recebida','Finalizada','Cancelada'].includes(t.status)?'disabled':''}>Confirmar envio</button><button class="btn small" onclick="confirmTransferReceipt('${t.id}')" ${!['Enviada','Em trânsito'].includes(t.status)?'disabled':''}>Receber</button><button class="btn danger small" onclick="cancelTransfer('${t.id}')" ${!['Rascunho','Pendente de envio'].includes(t.status)?'disabled':''}>Cancelar</button><button class="btn danger small" onclick="deleteTransfer('${t.id}')">Excluir remessa</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('Nenhuma transferência criada.')}`;
 }
 
 function renderWarehouses(){
@@ -2048,86 +2054,273 @@ function saveWarehouse(ev){
   state.warehouses.unshift(w); addAudit('Destino cadastrado','armazém',w.id,w.name); closeModal(); render();
 }
 
+
+function transferOperationalStatusOptions(){
+  return ['packing','aguardando coleta','enviado'];
+}
+
+function transferOperationalStatusLabel(value){
+  return value || 'packing';
+}
+
+function transferTagControl(t){
+  const current = transferOperationalStatusLabel(t.operational_status);
+  return `<select class="oper-tag-select" onchange="updateTransferOperationalStatus('${esc(t.id)}',this.value)">
+    ${transferOperationalStatusOptions().map(s=>`<option value="${esc(s)}" ${current===s?'selected':''}>${esc(s)}</option>`).join('')}
+  </select>`;
+}
+
+function updateTransferOperationalStatus(id, value){
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const old = transferOperationalStatusLabel(t.operational_status);
+  t.operational_status = value || 'packing';
+  t.updated_at = nowIso();
+  (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Status operacional alterado',detail:`${old} → ${t.operational_status}`});
+  addAudit('Status operacional da transferência alterado','transferência',t.id,`${t.code}: ${old} → ${t.operational_status}`);
+  save();
+  render();
+}
+
+function toggleMktShipmentField(){
+  const typeEl = document.querySelector('#transferForm select[name="type"]');
+  const box = document.getElementById('mktShipmentField');
+  if(!typeEl || !box) return;
+  box.style.display = String(typeEl.value || '').toLowerCase().includes('cd') ? '' : 'none';
+}
+
+function toggleEditMktShipmentField(){
+  const typeEl = document.querySelector('#editTransferForm select[name="type"]');
+  const box = document.getElementById('editMktShipmentField');
+  if(!typeEl || !box) return;
+  box.style.display = String(typeEl.value || '').toLowerCase().includes('cd') ? '' : 'none';
+}
+
+function fillEditTransferWarehouse(id){
+  const w=(state.warehouses||[]).find(x=>x.id===id);
+  if(!w) return;
+  const name = document.getElementById('editTrDestName');
+  const contact = document.getElementById('editTrDestContact');
+  const address = document.getElementById('editTrDestAddress');
+  if(name) name.value=w.name || '';
+  if(contact) contact.value=w.responsible || '';
+  if(address) address.value=fullWarehouseAddress(w);
+}
+
+function openEditTransferModal(id){
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const whs=(state.warehouses||[]).filter(w=>w.is_active);
+  const types=['Transferência para outro armazém','Transferência para depósito','Transferência para CD','Transferência para outlet','Transferência para fornecedor','Transferência para reparo','Transferência para reembalagem','Transferência para quarentena externa','Transferência para descarte','Transferência para doação','Transferência para perda operacional'];
+  const html=`<div class="modal-backdrop" id="modal">
+    <div class="modal" style="max-width:980px">
+      <div class="modal-header">
+        <div>
+          <h2>Editar remessa ${esc(t.code)}</h2>
+          <p>Atualize ID da remessa MKT, destino, datas, documentos e status operacional.</p>
+        </div>
+        <button class="btn ghost" onclick="closeModal()">Fechar</button>
+      </div>
+      <form id="editTransferForm" onsubmit="saveEditedTransfer(event,'${esc(t.id)}')">
+        <div class="form-grid two">
+          <div class="field">
+            <label>Tipo da transferência</label>
+            <select name="type" required onchange="toggleEditMktShipmentField()">
+              ${types.map(o=>`<option ${t.type===o?'selected':''}>${esc(o)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>Status operacional</label>
+            <select name="operational_status">
+              ${transferOperationalStatusOptions().map(s=>`<option value="${esc(s)}" ${transferOperationalStatusLabel(t.operational_status)===s?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" id="editMktShipmentField" style="${String(t.type||'').toLowerCase().includes('cd')?'':'display:none'}">
+            <label>ID da remessa MKT</label>
+            <input name="mkt_shipment_id" value="${esc(t.mkt_shipment_id || '')}" placeholder="Ex.: MKT-123456">
+          </div>
+          <div class="field">
+            <label>Destino cadastrado</label>
+            <select name="warehouse" onchange="fillEditTransferWarehouse(this.value)">
+              <option value="">Destino manual</option>
+              ${whs.map(w=>`<option value="${esc(w.id)}" ${t.destination_id===w.id?'selected':''}>${esc(w.name)} · ${esc(w.type)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Nome do destino</label><input name="destination_name" id="editTrDestName" required value="${esc(t.destination_name || '')}"></div>
+          <div class="field"><label>Responsável</label><input name="destination_contact" id="editTrDestContact" value="${esc(t.destination_contact || '')}"></div>
+          <div class="field" style="grid-column:1/-1"><label>Endereço completo</label><input name="destination_address" id="editTrDestAddress" required value="${esc(t.destination_address || '')}"></div>
+          <div class="field"><label>Transportadora</label><input name="carrier" value="${esc(t.carrier || '')}"></div>
+          <div class="field"><label>Rastreio</label><input name="tracking_code" value="${esc(t.tracking_code || '')}"></div>
+          <div class="field"><label>Documento interno</label><input name="document_number" value="${esc(t.document_number || '')}"></div>
+          <div class="field"><label>Data prevista de envio</label><input type="date" name="expected_ship_date" value="${esc(t.expected_ship_date || '')}"></div>
+          <div class="field"><label>Data prevista de recebimento</label><input type="date" name="expected_receive_date" value="${esc(t.expected_receive_date || '')}"></div>
+          <div class="field" style="grid-column:1/-1"><label>Observações</label><textarea name="notes">${esc(t.notes || '')}</textarea></div>
+        </div>
+        <div class="row-actions" style="margin-top:18px">
+          <button class="btn" type="button" onclick="closeModal()">Cancelar</button>
+          <button class="btn primary" type="submit">Salvar remessa</button>
+        </div>
+      </form>
+    </div>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+}
+
+function saveEditedTransfer(ev,id){
+  ev.preventDefault();
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const f=new FormData(ev.target);
+  const old = JSON.stringify({type:t.type, mkt:t.mkt_shipment_id, op:t.operational_status, dest:t.destination_name, address:t.destination_address, carrier:t.carrier, tracking:t.tracking_code});
+  t.type = String(f.get('type') || '');
+  t.destination_id = String(f.get('warehouse') || '');
+  t.destination_name = String(f.get('destination_name') || '');
+  t.destination_address = String(f.get('destination_address') || '');
+  t.destination_contact = String(f.get('destination_contact') || '');
+  t.mkt_shipment_id = String(f.get('mkt_shipment_id') || '').trim();
+  t.operational_status = String(f.get('operational_status') || 'packing');
+  t.carrier = String(f.get('carrier') || '');
+  t.tracking_code = String(f.get('tracking_code') || '');
+  t.document_number = String(f.get('document_number') || '');
+  t.expected_ship_date = String(f.get('expected_ship_date') || '');
+  t.expected_receive_date = String(f.get('expected_receive_date') || '');
+  t.notes = String(f.get('notes') || '');
+  t.updated_at = nowIso();
+  (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Remessa editada',detail:old});
+  addAudit('Remessa editada','transferência',t.id,`${t.code} · ${t.mkt_shipment_id || 'sem ID MKT'}`);
+  closeModal();
+  render();
+}
+
+function deleteTransfer(id){
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const reason = prompt(`Informe o motivo para excluir a remessa ${t.code}:`);
+  if(!reason || !reason.trim()){
+    alert('A exclusão da remessa exige um motivo.');
+    return;
+  }
+  if(!confirm(`Excluir a remessa ${t.code}? O histórico local desta transferência será removido da lista.`)) return;
+  addAudit('Remessa excluída','transferência',t.id,`${t.code} · Motivo: ${reason.trim()}`);
+  state.transfers = (state.transfers || []).filter(x => x.id !== id);
+  closeModal();
+  render();
+}
+
+function transferSkuSummaryItems(t){
+  const map = {};
+  (t.items || []).forEach(i => {
+    const key = i.sku || 'Sem SKU';
+    if(!map[key]) map[key] = {sku:key, productName:i.productName || '', ean:i.ean || '', quantity:0, totalValue:0};
+    map[key].quantity += Number(i.quantity || 0);
+    map[key].totalValue += Number(i.totalValue || 0);
+  });
+  return Object.values(map);
+}
+
+function printTransferPackingList(id){
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const items = transferSkuSummaryItems(t);
+  const rows = items.map((i,idx)=>`<tr>
+    <td>${idx+1}</td>
+    <td><strong>${esc(i.sku)}</strong><br><small>${esc(i.ean || '-')}</small></td>
+    <td>${esc(i.productName || '-')}</td>
+    <td style="text-align:center;font-weight:700">${num(i.quantity)}</td>
+    <td style="height:34px"></td>
+    <td></td>
+  </tr>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Romaneio ${esc(t.code)}</title>
+    <style>
+      body{font-family:Arial,sans-serif;margin:24px;color:#111827}
+      h1{font-size:22px;margin:0 0 6px}
+      .muted{color:#667085;font-size:12px}
+      .box{border:1px solid #d0d5dd;border-radius:10px;padding:12px;margin:12px 0}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      table{width:100%;border-collapse:collapse;margin-top:12px}
+      th,td{border:1px solid #d0d5dd;padding:8px;font-size:12px;text-align:left}
+      th{background:#f2f4f7}
+      .sign{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:36px}
+      .line{border-top:1px solid #111827;padding-top:8px;text-align:center;font-size:12px}
+      @media print{button{display:none}}
+    </style></head><body>
+      <button onclick="window.print()" style="float:right;padding:10px 14px">Imprimir / salvar PDF</button>
+      <h1>Romaneio de separação</h1>
+      <div class="muted">Gerado em ${brDate(nowIso())}</div>
+      <div class="box grid">
+        <div><strong>Transferência:</strong> ${esc(t.code)}</div>
+        <div><strong>Status operacional:</strong> ${esc(transferOperationalStatusLabel(t.operational_status))}</div>
+        <div><strong>Tipo:</strong> ${esc(t.type || '-')}</div>
+        <div><strong>ID remessa MKT:</strong> ${esc(t.mkt_shipment_id || '-')}</div>
+        <div><strong>Destino:</strong> ${esc(t.destination_name || '-')}</div>
+        <div><strong>Contato:</strong> ${esc(t.destination_contact || '-')}</div>
+        <div style="grid-column:1/-1"><strong>Endereço:</strong> ${esc(t.destination_address || '-')}</div>
+        <div><strong>Transportadora:</strong> ${esc(t.carrier || '-')}</div>
+        <div><strong>Rastreio:</strong> ${esc(t.tracking_code || '-')}</div>
+        <div><strong>Qtd total:</strong> ${num(t.total_quantity || 0)}</div>
+        <div><strong>Valor total:</strong> ${money(t.total_value || 0)}</div>
+      </div>
+      <table>
+        <thead><tr><th>#</th><th>SKU / EAN</th><th>Produto</th><th>Qtd</th><th>Conferido</th><th>Observação</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6">Sem itens.</td></tr>'}</tbody>
+      </table>
+      <div class="box"><strong>Observações:</strong><br>${esc(t.notes || '-')}</div>
+      <div class="sign">
+        <div class="line">Separação</div>
+        <div class="line">Conferência</div>
+        <div class="line">Expedição / Coleta</div>
+      </div>
+    </body></html>`;
+  const w = window.open('', '_blank');
+  if(!w){ alert('Permita pop-ups para gerar o romaneio.'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(()=>w.print(), 500);
+  addAudit('Romaneio de separação gerado','transferência',t.id,t.code);
+}
+
 function openTransferModal(prefillStockId=''){
   const stock=filterStockRows(getReturnedStockRows()).filter(r=>r.availableQuantity>0);
   const whs=(state.warehouses||[]).filter(w=>w.is_active);
-  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1100px"><div class="modal-header"><div><h2>Nova transferência</h2><p>Selecione o destino e os itens do estoque devolvido.</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><form id="transferForm" onsubmit="saveTransfer(event)"><div class="form-grid two"><div class="field"><label>Tipo da transferência</label><select name="type" id="transferType" required onchange="toggleMktShipmentField()"><option>Transferência para outro armazém</option><option>Transferência para depósito</option><option>Transferência para CD</option><option>Transferência para outlet</option><option>Transferência para fornecedor</option><option>Transferência para reparo</option><option>Transferência para reembalagem</option><option>Transferência para quarentena externa</option><option>Transferência para descarte</option><option>Transferência para doação</option><option>Transferência para perda operacional</option></select></div><div class="field"><label>Destino cadastrado</label><select name="warehouse" onchange="fillTransferWarehouse(this.value)"><option value="">Destino manual</option>${whs.map(w=>`<option value="${esc(w.id)}">${esc(w.name)} · ${esc(w.type)}</option>`).join('')}</select></div><div class="field" id="mktShipmentField" style="display:none"><label>ID da remessa MKT</label><input name="mkt_shipment_id" id="mktShipmentId" placeholder="Ex.: 123456789 / ID da remessa no marketplace"></div><div class="field"><label>Status operacional</label><select name="operation_tag">${TRANSFER_TAGS.map(t=>`<option>${esc(t)}</option>`).join('')}</select></div><div class="field"><label>Nome do destino</label><input name="destination_name" id="trDestName" required></div><div class="field"><label>Responsável</label><input name="destination_contact" id="trDestContact"></div><div class="field" style="grid-column:1/-1"><label>Endereço completo</label><input name="destination_address" id="trDestAddress" required></div><div class="field"><label>Transportadora</label><input name="carrier"></div><div class="field"><label>Rastreio</label><input name="tracking_code"></div><div class="field"><label>Documento interno</label><input name="document_number"></div><div class="field"><label>Data prevista de envio</label><input type="date" name="expected_ship_date"></div><div class="field"><label>Data prevista de recebimento</label><input type="date" name="expected_receive_date"></div><div class="field"><label>Observações</label><textarea name="notes"></textarea></div></div><h3 style="margin-top:18px">Itens disponíveis</h3><div class="table-wrap" style="max-height:360px"><table><thead><tr><th>Selecionar</th><th>SKU / Produto</th><th>Devolução</th><th>Disponível</th><th>Qtd a transferir</th><th>Destino atual</th></tr></thead><tbody>${stock.map(r=>`<tr><td><input type="checkbox" name="stock_id" value="${esc(r.id)}" ${prefillStockId===r.id?'checked':''}></td><td><strong>${esc(r.sku)}</strong><br><span class="hint">${esc(r.product)}</span></td><td>${esc(r.code)}<br><span class="hint">${esc(r.orderNumber||'-')}</span></td><td>${num(r.availableQuantity)}</td><td><input type="number" name="qty_${esc(r.id)}" min="0" max="${esc(r.availableQuantity)}" step="0.0001" value="${prefillStockId===r.id?esc(r.availableQuantity):''}"></td><td>${destBadge(r.finalDestination)}</td></tr>`).join('')}</tbody></table></div><div class="row-actions" style="margin-top:16px"><button class="btn" type="button" onclick="closeModal()">Cancelar</button><button class="btn primary" type="submit">Criar transferência</button></div></form></div></div>`;
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1100px"><div class="modal-header"><div><h2>Nova transferência</h2><p>Selecione o destino e os itens do estoque devolvido.</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><form id="transferForm" onsubmit="saveTransfer(event)"><div class="form-grid two"><div class="field"><label>Tipo da transferência</label><select name="type" required onchange="toggleMktShipmentField()"><option>Transferência para outro armazém</option><option>Transferência para depósito</option><option>Transferência para CD</option><option>Transferência para outlet</option><option>Transferência para fornecedor</option><option>Transferência para reparo</option><option>Transferência para reembalagem</option><option>Transferência para quarentena externa</option><option>Transferência para descarte</option><option>Transferência para doação</option><option>Transferência para perda operacional</option></select></div><div class="field mkt-remessa-box" id="mktShipmentField" style="display:none"><label>ID da remessa MKT</label><input name="mkt_shipment_id" placeholder="Ex.: MKT-123456"></div><div class="field"><label>Destino cadastrado</label><select name="warehouse" onchange="fillTransferWarehouse(this.value)"><option value="">Destino manual</option>${whs.map(w=>`<option value="${esc(w.id)}">${esc(w.name)} · ${esc(w.type)}</option>`).join('')}</select></div><div class="field"><label>Nome do destino</label><input name="destination_name" id="trDestName" required></div><div class="field"><label>Responsável</label><input name="destination_contact" id="trDestContact"></div><div class="field" style="grid-column:1/-1"><label>Endereço completo</label><input name="destination_address" id="trDestAddress" required></div><div class="field"><label>Transportadora</label><input name="carrier"></div><div class="field"><label>Rastreio</label><input name="tracking_code"></div><div class="field"><label>Documento interno</label><input name="document_number"></div><div class="field"><label>Data prevista de envio</label><input type="date" name="expected_ship_date"></div><div class="field"><label>Data prevista de recebimento</label><input type="date" name="expected_receive_date"></div><div class="field"><label>Observações</label><textarea name="notes"></textarea></div></div><h3 style="margin-top:18px">Itens disponíveis</h3><div class="table-wrap" style="max-height:360px"><table><thead><tr><th>Selecionar</th><th>SKU / Produto</th><th>Devolução</th><th>Disponível</th><th>Qtd a transferir</th><th>Destino atual</th></tr></thead><tbody>${stock.map(r=>`<tr><td><input type="checkbox" name="stock_id" value="${esc(r.id)}" ${prefillStockId===r.id?'checked':''}></td><td><strong>${esc(r.sku)}</strong><br><span class="hint">${esc(r.product)}</span></td><td>${esc(r.code)}<br><span class="hint">${esc(r.orderNumber||'-')}</span></td><td>${num(r.availableQuantity)}</td><td><input type="number" name="qty_${esc(r.id)}" min="0" max="${esc(r.availableQuantity)}" step="0.0001" value="${prefillStockId===r.id?esc(r.availableQuantity):''}"></td><td>${destBadge(r.finalDestination)}</td></tr>`).join('')}</tbody></table></div><div class="row-actions" style="margin-top:16px"><button class="btn" type="button" onclick="closeModal()">Cancelar</button><button class="btn primary" type="submit">Criar transferência</button></div></form></div></div>`;
   document.body.insertAdjacentHTML('beforeend',html);
-  toggleMktShipmentField();
 }
-
 function openQuickTransfer(stockId){ openTransferModal(stockId); }
 function fillTransferWarehouse(id){ const w=(state.warehouses||[]).find(x=>x.id===id); if(!w) return; document.getElementById('trDestName').value=w.name; document.getElementById('trDestContact').value=w.responsible||''; document.getElementById('trDestAddress').value=fullWarehouseAddress(w); }
 function saveTransfer(ev){
   ev.preventDefault(); const f=new FormData(ev.target); const selected=f.getAll('stock_id'); if(!selected.length){ alert('Selecione ao menos um item.'); return; }
   const rows=getReturnedStockRows(); const items=[]; let totalQty=0,totalValue=0;
   for(const sid of selected){ const r=rows.find(x=>x.id===sid); if(!r) continue; const q=Number(f.get('qty_'+sid)||0); if(q<=0){ alert('Informe quantidade válida para '+r.sku); return; } if(q>r.availableQuantity){ alert('Quantidade maior que saldo disponível para '+r.sku); return; } items.push({id:uid('tri'), returnedStockId:sid, returnId:r.returnId, returnItemId:r.itemId, sku:r.sku, ean:r.ean, productName:r.product, quantity:q, unitValue:r.unitValue, totalValue:q*r.unitValue, originLocation:r.location, destinationLocation:String(f.get('destination_name')||''), balanceBefore:r.currentBalance, balanceAfter:Math.max(0,r.currentBalance-q), status:'Pendente', notes:''}); totalQty+=q; totalValue+=q*r.unitValue; }
-  const type=String(f.get('type')||'');
-  const mktShipmentId=type==='Transferência para CD' ? String(f.get('mkt_shipment_id')||'').trim() : String(f.get('mkt_shipment_id')||'').trim();
-  const t={id:uid('tr'), code:'TRF-'+new Date().toISOString().slice(2,10).replace(/-/g,'')+'-'+String((state.transfers||[]).length+1).padStart(4,'0'), type, destination_id:String(f.get('warehouse')||''), destination_name:String(f.get('destination_name')||''), destination_address:String(f.get('destination_address')||''), destination_contact:String(f.get('destination_contact')||''), mkt_shipment_id:mktShipmentId, operation_tag:String(f.get('operation_tag')||'packing'), status:'Pendente de envio', created_by:currentUserName(), created_at:nowIso(), expected_ship_date:String(f.get('expected_ship_date')||''), expected_receive_date:String(f.get('expected_receive_date')||''), shipped_at:'', received_at:'', carrier:String(f.get('carrier')||''), tracking_code:String(f.get('tracking_code')||''), document_number:String(f.get('document_number')||''), notes:String(f.get('notes')||''), total_quantity:totalQty,total_value:totalValue, items, audit_history:[{at:nowIso(),user:currentUserName(),action:'Transferência criada'}]};
-  state.transfers.unshift(t); addAudit('Transferência criada','transferência',t.id,`${t.code} · ${t.destination_name}${t.mkt_shipment_id?' · Remessa MKT '+t.mkt_shipment_id:''}`); closeModal(); render();
+  const t={id:uid('tr'), code:'TRF-'+new Date().toISOString().slice(2,10).replace(/-/g,'')+'-'+String((state.transfers||[]).length+1).padStart(4,'0'), type:String(f.get('type')||''), destination_id:String(f.get('warehouse')||''), destination_name:String(f.get('destination_name')||''), destination_address:String(f.get('destination_address')||''), destination_contact:String(f.get('destination_contact')||''), mkt_shipment_id:String(f.get('mkt_shipment_id')||'').trim(), operational_status:'packing', status:'Pendente de envio', created_by:currentUserName(), created_at:nowIso(), updated_at:nowIso(), expected_ship_date:String(f.get('expected_ship_date')||''), expected_receive_date:String(f.get('expected_receive_date')||''), shipped_at:'', received_at:'', carrier:String(f.get('carrier')||''), tracking_code:String(f.get('tracking_code')||''), document_number:String(f.get('document_number')||''), notes:String(f.get('notes')||''), total_quantity:totalQty,total_value:totalValue, items, audit_history:[{at:nowIso(),user:currentUserName(),action:'Transferência criada',detail:String(f.get('mkt_shipment_id')||'')}]};
+  state.transfers.unshift(t); addAudit('Transferência criada','transferência',t.id,`${t.code} · ${t.destination_name} · MKT ${t.mkt_shipment_id || '-'}`); closeModal(); render();
 }
-
 function openTransferDetail(id){
-  const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return;
-  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1000px"><div class="modal-header"><div><h2>${esc(t.code)}</h2><p>${esc(t.type)} · ${esc(t.destination_name)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><div class="grid cols-2"><div class="item-card"><strong>Status</strong><p>${statusBadge(t.status)} ${transferTagBadge(t.operation_tag||'packing')}</p><p class="hint">Criada por ${esc(t.created_by)} em ${brDate(t.created_at)}</p><label style="margin-top:10px">Tag operacional</label>${renderTransferTagSelect(t.id,t.operation_tag||'packing')}</div><div class="item-card"><strong>Destino</strong><p>${esc(t.destination_address||'-')}</p><p class="hint">${esc(t.destination_contact||'')}</p><p><strong>ID remessa MKT:</strong> ${esc(t.mkt_shipment_id||'-')}</p></div></div><h3 style="margin-top:18px">Itens</h3><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Produto</th><th>Qtd</th><th>Saldo antes</th><th>Saldo depois</th><th>Valor</th></tr></thead><tbody>${(t.items||[]).map(i=>`<tr><td>${esc(i.sku)}</td><td>${esc(i.productName)}</td><td>${num(i.quantity)}</td><td>${num(i.balanceBefore)}</td><td>${num(i.balanceAfter)}</td><td>${money(i.totalValue)}</td></tr>`).join('')}</tbody></table></div><h3 style="margin-top:18px">Histórico</h3>${renderTimeline(t.audit_history||[])}<div class="row-actions" style="margin-top:16px"><button class="btn small" onclick="openEvidenceQr('transfer','','','Transferência')">Anexar evidência via QR</button><button class="btn small" onclick="editMktShipment('${t.id}')">Editar remessa</button><button class="btn small" onclick="printTransferPackingList('${t.id}')">Gerar romaneio PDF</button><button class="btn danger small" onclick="deleteTransferShipment('${t.id}')">Excluir remessa</button></div></div></div>`; document.body.insertAdjacentHTML('beforeend',html);
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1100px"><div class="modal-header"><div><h2>${esc(t.code)}</h2><p>${esc(t.type)} · ${esc(t.destination_name)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><div class="grid cols-2"><div class="item-card"><strong>Status</strong><p>${statusBadge(t.status)}</p><p><strong>Tag operacional:</strong><br>${transferTagControl(t)}</p><p class="hint">Criada por ${esc(t.created_by)} em ${brDate(t.created_at)}</p></div><div class="item-card"><strong>Remessa / destino</strong><p><strong>ID remessa MKT:</strong> ${esc(t.mkt_shipment_id || '-')}</p><p>${esc(t.destination_address||'-')}</p><p class="hint">${esc(t.destination_contact||'')}</p></div></div><h3 style="margin-top:18px">Itens</h3><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Produto</th><th>Qtd</th><th>Saldo antes</th><th>Saldo depois</th><th>Valor</th></tr></thead><tbody>${(t.items||[]).map(i=>`<tr><td>${esc(i.sku)}</td><td>${esc(i.productName)}</td><td>${num(i.quantity)}</td><td>${num(i.balanceBefore)}</td><td>${num(i.balanceAfter)}</td><td>${money(i.totalValue)}</td></tr>`).join('')}</tbody></table></div><h3 style="margin-top:18px">Histórico</h3>${renderTimeline(t.audit_history||[])}<div class="row-actions" style="margin-top:16px"><button class="btn small" onclick="openEditTransferModal('${t.id}')">Editar remessa</button><button class="btn small" onclick="printTransferPackingList('${t.id}')">Romaneio PDF</button><button class="btn small" onclick="openEvidenceQr('transfer','','','Transferência')">Anexar evidência via QR</button><button class="btn danger small" onclick="deleteTransfer('${t.id}')">Excluir remessa</button></div></div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
 }
-
-function confirmTransferShipment(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; if(!confirm(`Confirmar envio de ${t.code}? O saldo será baixado/reservado como enviado.`)) return; t.status=String(t.type||'').toLowerCase().includes('descarte')?'Finalizada':'Enviada'; t.operation_tag='enviado'; t.shipped_at=nowIso(); (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Envio confirmado',detail:'Tag operacional alterada para enviado'}); addAudit('Transferência enviada','transferência',t.id,t.code); render(); }
+function confirmTransferShipment(id){
+  const t=(state.transfers||[]).find(x=>x.id===id);
+  if(!t) return;
+  if(!confirm(`Confirmar envio de ${t.code}? O saldo será baixado/reservado como enviado.`)) return;
+  t.status=String(t.type||'').toLowerCase().includes('descarte')?'Finalizada':'Enviada';
+  t.operational_status='enviado';
+  t.shipped_at=nowIso();
+  t.updated_at=nowIso();
+  (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Envio confirmado',detail:'Tag operacional alterada para enviado'});
+  addAudit('Transferência enviada','transferência',t.id,t.code);
+  render();
+}
 function confirmTransferReceipt(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; t.status='Recebida'; t.received_at=nowIso(); (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Recebimento confirmado'}); addAudit('Transferência recebida','transferência',t.id,t.code); render(); }
 function cancelTransfer(id){ const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return; const reason=prompt('Motivo do cancelamento:'); if(!reason) return; t.status='Cancelada'; (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Cancelada',detail:reason}); addAudit('Transferência cancelada','transferência',t.id,reason); render(); }
-
-function toggleMktShipmentField(){
-  const typeEl=document.getElementById('transferType');
-  const field=document.getElementById('mktShipmentField');
-  if(!typeEl || !field) return;
-  field.style.display = typeEl.value === 'Transferência para CD' ? 'block' : 'none';
+function exportTransfersCsv(){
+  const rows=[['Codigo','ID remessa MKT','Tipo','Destino','Endereco','Qtd','Valor','Status transferencia','Status operacional','Criada em','Enviada em','Recebida em']];
+  (state.transfers||[]).forEach(t=>rows.push([t.code,t.mkt_shipment_id||'',t.type,t.destination_name,t.destination_address,t.total_quantity,t.total_value,t.status,transferOperationalStatusLabel(t.operational_status),brDate(t.created_at),brDate(t.shipped_at),brDate(t.received_at)]));
+  download('transferencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
 }
-
-function updateTransferOperationTag(id,value){
-  const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return;
-  const old=t.operation_tag||'packing';
-  t.operation_tag=value;
-  (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Tag operacional alterada',detail:`${old} -> ${value}`});
-  addAudit('Tag operacional da transferência alterada','transferência',t.id,`${t.code}: ${old} -> ${value}`);
-  save();
-  render();
-}
-
-function editMktShipment(id){
-  const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return;
-  const value=prompt('Informe o ID da remessa MKT:', t.mkt_shipment_id || '');
-  if(value === null) return;
-  const old=t.mkt_shipment_id || '';
-  t.mkt_shipment_id=String(value||'').trim();
-  (t.audit_history=t.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'ID da remessa MKT editado',detail:`${old || '-'} -> ${t.mkt_shipment_id || '-'}`});
-  addAudit('ID da remessa MKT editado','transferência',t.id,`${t.code}: ${old || '-'} -> ${t.mkt_shipment_id || '-'}`);
-  save();
-  render();
-}
-
-function deleteTransferShipment(id){
-  const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return;
-  const reason=prompt(`Informe o motivo para excluir a remessa ${t.code}:`);
-  if(!reason || !reason.trim()){ alert('A exclusão da remessa exige motivo.'); return; }
-  if(!confirm(`Excluir a remessa ${t.code}? Os itens voltarão a ficar disponíveis conforme o saldo recalculado.`)) return;
-  state.transfers=(state.transfers||[]).filter(x=>x.id!==id);
-  addAudit('Remessa/transferência excluída','transferência',id,`${t.code} · Motivo: ${reason.trim()}`);
-  closeModal();
-  render();
-}
-
-function printTransferPackingList(id){
-  const t=(state.transfers||[]).find(x=>x.id===id); if(!t) return;
-  const rows=(t.items||[]).map((i,idx)=>`<tr><td>${idx+1}</td><td>${esc(i.sku)}</td><td>${esc(i.ean||'-')}</td><td>${esc(i.productName)}</td><td>${num(i.quantity)}</td><td>${esc(i.originLocation||'-')}</td><td>${esc(i.notes||'')}</td></tr>`).join('');
-  const html=`<!doctype html><html><head><meta charset="utf-8"><title>Romaneio ${esc(t.code)}</title><style>body{font-family:Arial,sans-serif;color:#111827;margin:28px}h1{margin:0 0 8px;font-size:24px}.muted{color:#6b7280;font-size:12px}.box{border:1px solid #d1d5db;border-radius:10px;padding:12px;margin:12px 0}table{width:100%;border-collapse:collapse;margin-top:14px}th,td{border:1px solid #d1d5db;padding:8px;font-size:12px;text-align:left}th{background:#f3f4f6}.sign{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:44px}.line{border-top:1px solid #111827;padding-top:8px;text-align:center;font-size:12px}@media print{button{display:none}}</style></head><body><button onclick="window.print()">Imprimir / salvar em PDF</button><h1>Romaneio de Separação</h1><div class="muted">Gerado em ${brDate(nowIso())}</div><div class="box"><strong>Transferência:</strong> ${esc(t.code)}<br><strong>Tipo:</strong> ${esc(t.type)}<br><strong>ID remessa MKT:</strong> ${esc(t.mkt_shipment_id||'-')}<br><strong>Status operacional:</strong> ${esc(t.operation_tag||'packing')}<br><strong>Destino:</strong> ${esc(t.destination_name||'-')}<br><strong>Endereço:</strong> ${esc(t.destination_address||'-')}<br><strong>Responsável:</strong> ${esc(t.destination_contact||'-')}<br><strong>Transportadora:</strong> ${esc(t.carrier||'-')}<br><strong>Rastreio:</strong> ${esc(t.tracking_code||'-')}</div><table><thead><tr><th>#</th><th>SKU</th><th>EAN</th><th>Produto</th><th>Qtd</th><th>Origem</th><th>Obs.</th></tr></thead><tbody>${rows}</tbody></table><div class="box"><strong>Total de unidades:</strong> ${num(t.total_quantity)}<br><strong>Valor total:</strong> ${money(t.total_value)}</div><div class="sign"><div class="line">Separação</div><div class="line">Conferência / Expedição</div></div><script>setTimeout(()=>window.print(),300)<\/script></body></html>`;
-  const win=window.open('','_blank');
-  if(!win){ alert('Permita pop-ups para gerar o romaneio.'); return; }
-  win.document.open(); win.document.write(html); win.document.close();
-  addAudit('Romaneio de separação gerado','transferência',t.id,t.code);
-}
-
-function exportTransfersCsv(){ const rows=[['Codigo','Tipo','ID remessa MKT','Tag operacional','Destino','Endereco','Qtd','Valor','Status','Criada em','Enviada em','Recebida em']]; (state.transfers||[]).forEach(t=>rows.push([t.code,t.type,t.mkt_shipment_id||'',t.operation_tag||'packing',t.destination_name,t.destination_address,t.total_quantity,t.total_value,t.status,brDate(t.created_at),brDate(t.shipped_at),brDate(t.received_at)])); download('transferencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
 
 function renderEvidenceCenter(){
   const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
