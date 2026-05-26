@@ -1203,6 +1203,7 @@ function renderReturnWorkflow(ret){
           </div>
           <div class="row-actions no-print">
             ${statusBadge(ret.status)}
+            <button class="btn" onclick="openEditReturnModal('${ret.id}')">Editar devolução</button>
             <button class="btn ghost" onclick="state.currentReturnId=null; nav('devolucoes')">Voltar</button>
           </div>
         </div>
@@ -1859,7 +1860,7 @@ function renderReturns(){
                   <td>${esc(r.invoice?.number || '-')}<br><span class="hint">${esc(r.invoice?.accessKey || '-')}</span></td>
                   <td>${r.items.length}</td>
                   <td>${statusBadge(r.status)}</td>
-                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button><button class="btn danger small" onclick="deleteReturnRecord('${r.id}')">Excluir</button></div></td>
+                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn small" onclick="openEditReturnModal('${r.id}')">Editar</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button><button class="btn danger small" onclick="deleteReturnRecord('${r.id}')">Excluir</button></div></td>
                 </tr>`).join('')}
             </tbody>
           </table>
@@ -1891,6 +1892,165 @@ function deleteReturnRecord(retId){
   state.returns = state.returns.filter(r => r.id !== retId);
   if(state.currentReturnId === retId) state.currentReturnId = null;
   state.route = 'devolucoes';
+  render();
+}
+
+
+function openEditReturnModal(retId){
+  const ret = getReturn(retId);
+  if(!ret) return;
+  const marketplaces = state.rules.marketplaces || [];
+  const reasons = ['Arrependimento','Produto com defeito','Produto avariado no transporte','Produto diferente do anunciado','Compra cancelada','Outro'];
+  const html = `
+    <div class="modal-backdrop" id="modal">
+      <div class="modal" style="max-width:1180px">
+        <div class="modal-header">
+          <div>
+            <h2>Editar devolução ${esc(ret.code)}</h2>
+            <p>Corrija informações preenchidas no cadastro inicial sem alterar o fluxo atual da devolução.</p>
+          </div>
+          <button class="btn ghost" onclick="closeModal()">Fechar</button>
+        </div>
+        <form onsubmit="saveEditedReturn(event,'${ret.id}')">
+          <h3>Dados operacionais</h3>
+          <div class="form-grid two">
+            <div class="field"><label>Número do pedido</label><input name="orderNumber" value="${esc(ret.orderNumber || '')}"></div>
+            <div class="field"><label>Marketplace</label><select name="marketplace">${marketplaces.map(m=>`<option ${ret.marketplace===m?'selected':''}>${esc(m)}</option>`).join('')}</select></div>
+            <div class="field"><label>Nome do cliente</label><input name="customerName" value="${esc(ret.customerName || '')}"></div>
+            <div class="field"><label>CPF/CNPJ do cliente</label><input name="customerDoc" value="${esc(ret.customerDoc || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Transportadora</label><input name="carrier" value="${esc(ret.carrier || '')}"></div>
+            <div class="field"><label>Código de rastreio</label><input name="trackingCode" value="${esc(ret.trackingCode || '')}"></div>
+            <div class="field"><label>Motivo da devolução</label><select name="returnReason">${reasons.map(r=>`<option ${ret.returnReason===r?'selected':''}>${esc(r)}</option>`).join('')}</select></div>
+            <div class="field"><label>Data e hora do recebimento</label><input name="receivedAt" type="datetime-local" value="${esc(toDatetimeLocal(ret.receivedAt))}"></div>
+            <div class="field" style="grid-column:1/-1"><label>Observação inicial</label><textarea name="initialNote">${esc(ret.initialNote || '')}</textarea></div>
+          </div>
+
+          <h3 style="margin-top:18px">Dados da NF-e</h3>
+          <div class="form-grid two">
+            <div class="field"><label>Chave de acesso</label><input name="invoice_accessKey" maxlength="44" value="${esc(ret.invoice?.accessKey || '')}" oninput="this.value=this.value.replace(/\D/g,'').slice(0,44)"></div>
+            <div class="field"><label>Número da NF</label><input name="invoice_number" value="${esc(ret.invoice?.number || '')}"></div>
+            <div class="field"><label>Série</label><input name="invoice_series" value="${esc(ret.invoice?.series || '')}"></div>
+            <div class="field"><label>Data de emissão</label><input name="invoice_issueDate" value="${esc(ret.invoice?.issueDate || '')}"></div>
+            <div class="field"><label>Emitente</label><input name="invoice_issuer_name" value="${esc(ret.invoice?.issuer?.name || '')}"></div>
+            <div class="field"><label>CNPJ/CPF emitente</label><input name="invoice_issuer_document" value="${esc(ret.invoice?.issuer?.document || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Destinatário</label><input name="invoice_recipient_name" value="${esc(ret.invoice?.recipient?.name || '')}"></div>
+            <div class="field"><label>CPF/CNPJ destinatário</label><input name="invoice_recipient_document" value="${esc(ret.invoice?.recipient?.document || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Valor total da NF</label><input name="invoice_totalValue" type="number" step="0.01" value="${esc(ret.invoice?.totalValue || 0)}"></div>
+          </div>
+
+          <h3 style="margin-top:18px">Itens da devolução</h3>
+          <p class="hint">Edite SKU, EAN, descrição, quantidade esperada, unidade, CFOP, NCM e valores quando o cadastro inicial estiver incorreto.</p>
+          <div class="table-wrap" style="max-height:420px">
+            <table>
+              <thead><tr><th>SKU</th><th>EAN</th><th>Produto</th><th>NCM</th><th>CFOP</th><th>Un.</th><th>Qtd NF/esperada</th><th>Valor unit.</th><th>Valor total</th></tr></thead>
+              <tbody>
+                ${(ret.items || []).map(item=>`
+                  <tr>
+                    <td><input name="item_${item.id}_sku" value="${esc(item.sku || '')}"></td>
+                    <td><input name="item_${item.id}_ean" value="${esc(item.ean || '')}"></td>
+                    <td><input name="item_${item.id}_description" value="${esc(item.description || '')}"></td>
+                    <td><input name="item_${item.id}_ncm" value="${esc(item.ncm || '')}"></td>
+                    <td><input name="item_${item.id}_cfop" value="${esc(item.cfop || '')}"></td>
+                    <td><input name="item_${item.id}_unit" value="${esc(item.unit || 'UN')}"></td>
+                    <td><input name="item_${item.id}_expectedQty" type="number" min="0" step="0.0001" value="${esc(item.expectedQty ?? item.soldQty ?? '')}"></td>
+                    <td><input name="item_${item.id}_unitValue" type="number" step="0.01" value="${esc(item.unitValue || 0)}"></td>
+                    <td><input name="item_${item.id}_totalValue" type="number" step="0.01" value="${esc(item.totalValue || 0)}"></td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="row-actions" style="margin-top:18px">
+            <button class="btn" type="button" onclick="closeModal()">Cancelar</button>
+            <button class="btn primary" type="submit">Salvar alterações</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function toDatetimeLocal(value){
+  if(!value) return '';
+  if(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(value))) return value;
+  const d = new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value).slice(0,16);
+  const offset = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - offset * 60000);
+  return local.toISOString().slice(0,16);
+}
+
+function snapshotReturnEditableFields(ret){
+  return JSON.stringify({
+    orderNumber:ret.orderNumber, marketplace:ret.marketplace, customerName:ret.customerName,
+    customerDoc:ret.customerDoc, carrier:ret.carrier, trackingCode:ret.trackingCode,
+    returnReason:ret.returnReason, receivedAt:ret.receivedAt, initialNote:ret.initialNote,
+    invoice:ret.invoice,
+    items:(ret.items||[]).map(i=>({id:i.id, sku:i.sku, ean:i.ean, description:i.description, ncm:i.ncm, cfop:i.cfop, unit:i.unit, expectedQty:i.expectedQty, soldQty:i.soldQty, unitValue:i.unitValue, totalValue:i.totalValue}))
+  });
+}
+
+function saveEditedReturn(event, retId){
+  event.preventDefault();
+  const ret = getReturn(retId);
+  if(!ret) return;
+  const before = snapshotReturnEditableFields(ret);
+  const f = new FormData(event.target);
+
+  ret.orderNumber = String(f.get('orderNumber') || '').trim();
+  ret.marketplace = String(f.get('marketplace') || '').trim();
+  ret.customerName = String(f.get('customerName') || '').trim();
+  ret.customerDoc = cleanDigits(f.get('customerDoc'));
+  ret.carrier = String(f.get('carrier') || '').trim();
+  ret.trackingCode = String(f.get('trackingCode') || '').trim();
+  ret.returnReason = String(f.get('returnReason') || '').trim();
+  ret.receivedAt = String(f.get('receivedAt') || '').trim();
+  ret.initialNote = String(f.get('initialNote') || '').trim();
+
+  ret.invoice = ret.invoice || {issuer:{}, recipient:{}, items:[]};
+  ret.invoice.issuer = ret.invoice.issuer || {};
+  ret.invoice.recipient = ret.invoice.recipient || {};
+  ret.invoice.accessKey = cleanDigits(f.get('invoice_accessKey'));
+  ret.invoice.number = String(f.get('invoice_number') || '').trim();
+  ret.invoice.series = String(f.get('invoice_series') || '').trim();
+  ret.invoice.issueDate = String(f.get('invoice_issueDate') || '').trim();
+  ret.invoice.issuer.name = String(f.get('invoice_issuer_name') || '').trim();
+  ret.invoice.issuer.document = cleanDigits(f.get('invoice_issuer_document'));
+  ret.invoice.recipient.name = String(f.get('invoice_recipient_name') || '').trim();
+  ret.invoice.recipient.document = cleanDigits(f.get('invoice_recipient_document'));
+  ret.invoice.totalValue = Number(f.get('invoice_totalValue') || 0);
+
+  (ret.items || []).forEach(item => {
+    const base = `item_${item.id}_`;
+    item.sku = String(f.get(base+'sku') || '').trim();
+    item.ean = String(f.get(base+'ean') || '').trim();
+    item.description = String(f.get(base+'description') || '').trim();
+    item.ncm = String(f.get(base+'ncm') || '').trim();
+    item.cfop = String(f.get(base+'cfop') || '').trim();
+    item.unit = String(f.get(base+'unit') || '').trim() || 'UN';
+    item.expectedQty = Number(f.get(base+'expectedQty') || 0);
+    item.soldQty = item.expectedQty;
+    item.unitValue = Number(f.get(base+'unitValue') || 0);
+    item.totalValue = Number(f.get(base+'totalValue') || 0);
+  });
+
+  ret.invoice.items = (ret.items || []).map(item => ({
+    id: item.invoiceItemId || item.id,
+    sku: item.sku,
+    ean: item.ean,
+    description: item.description,
+    ncm: item.ncm,
+    cfop: item.cfop,
+    unit: item.unit,
+    quantity: Number(item.expectedQty || 0),
+    unitValue: Number(item.unitValue || 0),
+    totalValue: Number(item.totalValue || 0)
+  }));
+
+  ret.alerts = validateReturn(ret);
+  ret.updatedAt = nowIso();
+  const after = snapshotReturnEditableFields(ret);
+  addReturnAudit(ret, 'Devolução editada', before === after ? 'Nenhuma alteração detectada.' : 'Dados cadastrais, fiscais ou itens foram corrigidos manualmente.');
+  closeModal();
   render();
 }
 
