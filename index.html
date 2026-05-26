@@ -1859,7 +1859,7 @@ function renderReturns(){
                   <td>${esc(r.invoice?.number || '-')}<br><span class="hint">${esc(r.invoice?.accessKey || '-')}</span></td>
                   <td>${r.items.length}</td>
                   <td>${statusBadge(r.status)}</td>
-                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button></div></td>
+                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button><button class="btn danger small" onclick="deleteReturnRecord('${r.id}')">Excluir</button></div></td>
                 </tr>`).join('')}
             </tbody>
           </table>
@@ -1875,6 +1875,22 @@ function cancelReturn(retId){
   if(!confirm(`Cancelar ${ret.code}?`)) return;
   ret.status = 'Cancelado';
   addReturnAudit(ret, 'Processo cancelado', 'Cancelamento manual');
+  render();
+}
+
+function deleteReturnRecord(retId){
+  const ret = getReturn(retId);
+  if(!ret) return;
+  const reason = prompt(`Informe o motivo para excluir ${ret.code}:`);
+  if(!reason || !reason.trim()) {
+    alert('A exclusão exige um motivo.');
+    return;
+  }
+  if(!confirm(`Excluir definitivamente ${ret.code} dos registros locais? Esta ação removerá a devolução da lista.`)) return;
+  addAudit('Devolução excluída dos registros', 'devolução', ret.id, `${ret.code} · Motivo: ${reason.trim()}`);
+  state.returns = state.returns.filter(r => r.id !== retId);
+  if(state.currentReturnId === retId) state.currentReturnId = null;
+  state.route = 'devolucoes';
   render();
 }
 
