@@ -223,6 +223,43 @@
       border:1px solid var(--line);border-radius:12px;padding:10px;background:#f8fafc;min-width:150px;max-width:220px;
     }
     .evidence img{width:100%;max-height:110px;object-fit:cover;border-radius:10px;margin-top:8px}
+    .evidence-gallery{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+      gap:16px;
+      align-items:start;
+    }
+    .evidence-thumb{
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:#fff;
+      overflow:hidden;
+      box-shadow:0 8px 20px rgba(15,23,42,.05);
+      cursor:pointer;
+      transition:.18s ease;
+      min-width:0;
+    }
+    .evidence-thumb:hover{transform:translateY(-2px);box-shadow:0 14px 28px rgba(15,23,42,.08)}
+    .evidence-thumb img{
+      display:block;
+      width:100%;
+      height:150px;
+      max-height:150px;
+      object-fit:cover;
+      background:#f8fafc;
+    }
+    .evidence-thumb > div:not(.file-icon){padding:12px}
+    .file-icon{
+      height:150px;
+      display:grid;
+      place-items:center;
+      background:#f1f5f9;
+      color:#475569;
+      font-weight:900;
+      text-transform:uppercase;
+      font-size:18px;
+    }
+    @media(max-width:720px){.evidence-gallery{grid-template-columns:repeat(auto-fill,minmax(145px,1fr))}.evidence-thumb img,.file-icon{height:120px}}
     .empty{
       border:1px dashed #cbd5e1;background:#f8fafc;color:#64748b;border-radius:18px;padding:30px;text-align:center;
     }
@@ -1222,6 +1259,7 @@ function renderReturnWorkflow(ret){
           </div>
           <div class="row-actions no-print">
             ${statusBadge(ret.status)}
+            <button class="btn" onclick="openEditReturnModal('${ret.id}')">Editar devolução</button>
             <button class="btn ghost" onclick="state.currentReturnId=null; nav('devolucoes')">Voltar</button>
           </div>
         </div>
@@ -1878,7 +1916,7 @@ function renderReturns(){
                   <td>${esc(r.invoice?.number || '-')}<br><span class="hint">${esc(r.invoice?.accessKey || '-')}</span></td>
                   <td>${r.items.length}</td>
                   <td>${statusBadge(r.status)}</td>
-                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button></div></td>
+                  <td><div class="row-actions"><button class="btn small" onclick="openReturn('${r.id}')">Abrir</button><button class="btn small" onclick="openEditReturnModal('${r.id}')">Editar</button><button class="btn danger small" onclick="cancelReturn('${r.id}')">Cancelar</button></div></td>
                 </tr>`).join('')}
             </tbody>
           </table>
@@ -1894,6 +1932,164 @@ function cancelReturn(retId){
   if(!confirm(`Cancelar ${ret.code}?`)) return;
   ret.status = 'Cancelado';
   addReturnAudit(ret, 'Processo cancelado', 'Cancelamento manual');
+  render();
+}
+
+function toDatetimeLocal(value){
+  if(!value) return '';
+  if(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(String(value))) return value;
+  const d = new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value).slice(0,16);
+  const offset = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - offset * 60000);
+  return local.toISOString().slice(0,16);
+}
+
+function snapshotReturnEditableFields(ret){
+  return JSON.stringify({
+    orderNumber:ret.orderNumber, marketplace:ret.marketplace, customerName:ret.customerName,
+    customerDoc:ret.customerDoc, carrier:ret.carrier, trackingCode:ret.trackingCode,
+    returnReason:ret.returnReason, receivedAt:ret.receivedAt, initialNote:ret.initialNote,
+    invoice:ret.invoice,
+    items:(ret.items||[]).map(i=>({id:i.id, sku:i.sku, ean:i.ean, description:i.description, ncm:i.ncm, cfop:i.cfop, unit:i.unit, expectedQty:i.expectedQty, soldQty:i.soldQty, unitValue:i.unitValue, totalValue:i.totalValue}))
+  });
+}
+
+function openEditReturnModal(retId){
+  const ret = getReturn(retId);
+  if(!ret) return;
+  const marketplaces = state.rules.marketplaces || [];
+  const reasons = ['Arrependimento','Produto com defeito','Produto avariado no transporte','Produto diferente do anunciado','Compra cancelada','Outro'];
+  const html = `
+    <div class="modal-backdrop" id="modal">
+      <div class="modal" style="max-width:1180px">
+        <div class="modal-header">
+          <div>
+            <h2>Editar devolução ${esc(ret.code)}</h2>
+            <p>Corrija informações preenchidas no cadastro inicial, como marketplace, pedido, cliente, NF-e e itens.</p>
+          </div>
+          <button class="btn ghost" onclick="closeModal()">Fechar</button>
+        </div>
+        <form onsubmit="saveEditedReturn(event,'${ret.id}')">
+          <h3>Dados operacionais</h3>
+          <div class="form-grid two">
+            <div class="field"><label>Número do pedido</label><input name="orderNumber" value="${esc(ret.orderNumber || '')}"></div>
+            <div class="field"><label>Marketplace</label><select name="marketplace">${marketplaces.map(m=>`<option ${ret.marketplace===m?'selected':''}>${esc(m)}</option>`).join('')}</select></div>
+            <div class="field"><label>Nome do cliente</label><input name="customerName" value="${esc(ret.customerName || '')}"></div>
+            <div class="field"><label>CPF/CNPJ do cliente</label><input name="customerDoc" value="${esc(ret.customerDoc || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Transportadora</label><input name="carrier" value="${esc(ret.carrier || '')}"></div>
+            <div class="field"><label>Código de rastreio</label><input name="trackingCode" value="${esc(ret.trackingCode || '')}"></div>
+            <div class="field"><label>Motivo da devolução</label><select name="returnReason">${reasons.map(r=>`<option ${ret.returnReason===r?'selected':''}>${esc(r)}</option>`).join('')}</select></div>
+            <div class="field"><label>Data e hora do recebimento</label><input name="receivedAt" type="datetime-local" value="${esc(toDatetimeLocal(ret.receivedAt))}"></div>
+            <div class="field" style="grid-column:1/-1"><label>Observação inicial</label><textarea name="initialNote">${esc(ret.initialNote || '')}</textarea></div>
+          </div>
+
+          <h3 style="margin-top:18px">Dados da NF-e</h3>
+          <div class="form-grid two">
+            <div class="field"><label>Chave de acesso</label><input name="invoice_accessKey" maxlength="44" value="${esc(ret.invoice?.accessKey || '')}" oninput="this.value=this.value.replace(/\D/g,'').slice(0,44)"></div>
+            <div class="field"><label>Número da NF</label><input name="invoice_number" value="${esc(ret.invoice?.number || '')}"></div>
+            <div class="field"><label>Série</label><input name="invoice_series" value="${esc(ret.invoice?.series || '')}"></div>
+            <div class="field"><label>Data de emissão</label><input name="invoice_issueDate" value="${esc(ret.invoice?.issueDate || '')}"></div>
+            <div class="field"><label>Emitente</label><input name="invoice_issuer_name" value="${esc(ret.invoice?.issuer?.name || '')}"></div>
+            <div class="field"><label>CNPJ/CPF emitente</label><input name="invoice_issuer_document" value="${esc(ret.invoice?.issuer?.document || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Destinatário</label><input name="invoice_recipient_name" value="${esc(ret.invoice?.recipient?.name || '')}"></div>
+            <div class="field"><label>CPF/CNPJ destinatário</label><input name="invoice_recipient_document" value="${esc(ret.invoice?.recipient?.document || '')}" oninput="this.value=this.value.replace(/\D/g,'')"></div>
+            <div class="field"><label>Valor total da NF</label><input name="invoice_totalValue" type="number" step="0.01" value="${esc(ret.invoice?.totalValue || 0)}"></div>
+          </div>
+
+          <h3 style="margin-top:18px">Itens da devolução</h3>
+          <p class="hint">Edite SKU, EAN, descrição, quantidade esperada, unidade, CFOP, NCM e valores quando o cadastro inicial estiver incorreto.</p>
+          <div class="table-wrap" style="max-height:420px">
+            <table>
+              <thead><tr><th>SKU</th><th>EAN</th><th>Produto</th><th>NCM</th><th>CFOP</th><th>Un.</th><th>Qtd NF/esperada</th><th>Valor unit.</th><th>Valor total</th></tr></thead>
+              <tbody>
+                ${(ret.items || []).map(item=>`
+                  <tr>
+                    <td><input name="item_${item.id}_sku" value="${esc(item.sku || '')}"></td>
+                    <td><input name="item_${item.id}_ean" value="${esc(item.ean || '')}"></td>
+                    <td><input name="item_${item.id}_description" value="${esc(item.description || '')}"></td>
+                    <td><input name="item_${item.id}_ncm" value="${esc(item.ncm || '')}"></td>
+                    <td><input name="item_${item.id}_cfop" value="${esc(item.cfop || '')}"></td>
+                    <td><input name="item_${item.id}_unit" value="${esc(item.unit || 'UN')}"></td>
+                    <td><input name="item_${item.id}_expectedQty" type="number" min="0" step="0.0001" value="${esc(item.expectedQty ?? item.soldQty ?? '')}"></td>
+                    <td><input name="item_${item.id}_unitValue" type="number" step="0.01" value="${esc(item.unitValue || 0)}"></td>
+                    <td><input name="item_${item.id}_totalValue" type="number" step="0.01" value="${esc(item.totalValue || 0)}"></td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="row-actions" style="margin-top:18px">
+            <button class="btn" type="button" onclick="closeModal()">Cancelar</button>
+            <button class="btn primary" type="submit">Salvar alterações</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function saveEditedReturn(event, retId){
+  event.preventDefault();
+  const ret = getReturn(retId);
+  if(!ret) return;
+  const before = snapshotReturnEditableFields(ret);
+  const f = new FormData(event.target);
+
+  ret.orderNumber = String(f.get('orderNumber') || '').trim();
+  ret.marketplace = String(f.get('marketplace') || '').trim();
+  ret.customerName = String(f.get('customerName') || '').trim();
+  ret.customerDoc = cleanDigits(f.get('customerDoc'));
+  ret.carrier = String(f.get('carrier') || '').trim();
+  ret.trackingCode = String(f.get('trackingCode') || '').trim();
+  ret.returnReason = String(f.get('returnReason') || '').trim();
+  ret.receivedAt = String(f.get('receivedAt') || '').trim();
+  ret.initialNote = String(f.get('initialNote') || '').trim();
+
+  ret.invoice = ret.invoice || {issuer:{}, recipient:{}, items:[]};
+  ret.invoice.issuer = ret.invoice.issuer || {};
+  ret.invoice.recipient = ret.invoice.recipient || {};
+  ret.invoice.accessKey = cleanDigits(f.get('invoice_accessKey'));
+  ret.invoice.number = String(f.get('invoice_number') || '').trim();
+  ret.invoice.series = String(f.get('invoice_series') || '').trim();
+  ret.invoice.issueDate = String(f.get('invoice_issueDate') || '').trim();
+  ret.invoice.issuer.name = String(f.get('invoice_issuer_name') || '').trim();
+  ret.invoice.issuer.document = cleanDigits(f.get('invoice_issuer_document'));
+  ret.invoice.recipient.name = String(f.get('invoice_recipient_name') || '').trim();
+  ret.invoice.recipient.document = cleanDigits(f.get('invoice_recipient_document'));
+  ret.invoice.totalValue = Number(f.get('invoice_totalValue') || 0);
+
+  (ret.items || []).forEach(item => {
+    const base = `item_${item.id}_`;
+    item.sku = String(f.get(base+'sku') || '').trim();
+    item.ean = String(f.get(base+'ean') || '').trim();
+    item.description = String(f.get(base+'description') || '').trim();
+    item.ncm = String(f.get(base+'ncm') || '').trim();
+    item.cfop = String(f.get(base+'cfop') || '').trim();
+    item.unit = String(f.get(base+'unit') || '').trim() || 'UN';
+    item.expectedQty = Number(f.get(base+'expectedQty') || 0);
+    item.soldQty = item.expectedQty;
+    item.unitValue = Number(f.get(base+'unitValue') || 0);
+    item.totalValue = Number(f.get(base+'totalValue') || 0);
+  });
+
+  ret.invoice.items = (ret.items || []).map(item => ({
+    id: item.invoiceItemId || item.id,
+    sku: item.sku,
+    ean: item.ean,
+    description: item.description,
+    ncm: item.ncm,
+    cfop: item.cfop,
+    unit: item.unit,
+    quantity: Number(item.expectedQty || 0),
+    unitValue: Number(item.unitValue || 0),
+    totalValue: Number(item.totalValue || 0)
+  }));
+
+  ret.alerts = validateReturn(ret);
+  ret.updatedAt = nowIso();
+  const after = snapshotReturnEditableFields(ret);
+  addReturnAudit(ret, 'Devolução editada', before === after ? 'Nenhuma alteração detectada.' : 'Dados cadastrais, fiscais ou itens foram corrigidos manualmente.');
+  closeModal();
   render();
 }
 
@@ -2324,7 +2520,7 @@ function exportTransfersCsv(){
 
 function renderEvidenceCenter(){
   const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
-  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-grid" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
 }
 function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=e.preview||e.file_url||e.thumbnail_url||''; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${url?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc">`:empty('Arquivo sem preview.')}<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
 function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
