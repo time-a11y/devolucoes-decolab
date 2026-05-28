@@ -223,6 +223,55 @@
       border:1px solid var(--line);border-radius:12px;padding:10px;background:#f8fafc;min-width:150px;max-width:220px;
     }
     .evidence img{width:100%;max-height:110px;object-fit:cover;border-radius:10px;margin-top:8px}
+
+    .evidence-gallery{
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+      gap:16px;
+      align-items:start;
+      width:100%;
+    }
+    .evidence-thumb{
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:#fff;
+      overflow:hidden;
+      box-shadow:0 8px 20px rgba(15,23,42,.05);
+      cursor:pointer;
+      transition:.18s ease;
+      min-width:0;
+    }
+    .evidence-thumb:hover{
+      transform:translateY(-2px);
+      box-shadow:0 14px 28px rgba(15,23,42,.08);
+    }
+    .evidence-thumb img{
+      display:block;
+      width:100%;
+      height:150px;
+      max-height:150px;
+      object-fit:cover;
+      object-position:center;
+      background:#f8fafc;
+    }
+    .evidence-thumb > div:not(.file-icon){
+      padding:12px;
+    }
+    .file-icon{
+      height:150px;
+      display:grid;
+      place-items:center;
+      background:#f1f5f9;
+      color:#475569;
+      font-weight:900;
+      text-transform:uppercase;
+      font-size:18px;
+    }
+    @media(max-width:720px){
+      .evidence-gallery{grid-template-columns:repeat(auto-fill,minmax(145px,1fr))}
+      .evidence-thumb img,.file-icon{height:120px;max-height:120px}
+    }
+
     .empty{
       border:1px dashed #cbd5e1;background:#f8fafc;color:#64748b;border-radius:18px;padding:30px;text-align:center;
     }
@@ -2502,7 +2551,7 @@ function exportTransfersCsv(){ const rows=[['Codigo','Tipo','Destino','Endereco'
 
 function renderEvidenceCenter(){
   const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
-  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-grid" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.thumbnail_url || e.file_url || e.public_url || e.url || '')}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
 }
 function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=e.preview||e.file_url||e.thumbnail_url||''; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${url?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc">`:empty('Arquivo sem preview.')}<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
 function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
