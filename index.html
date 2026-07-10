@@ -468,6 +468,93 @@ function ensureStateExtensions(){
   state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
 }
 
+function normalizedReturnStatus(value){
+  return String(value || '').trim().toLowerCase();
+}
+
+function isReturnDeletedOrCanceled(ret){
+  const status = normalizedReturnStatus(ret.status);
+  return !!(
+    ret.isDeleted ||
+    ret.is_deleted ||
+    ret.deleted ||
+    ret.deleted_at ||
+    ret.deletedAt ||
+    ret.removed ||
+    status === 'cancelado' ||
+    status === 'cancelada' ||
+    status === 'excluído' ||
+    status === 'excluída' ||
+    status === 'excluido' ||
+    status === 'excluida'
+  );
+}
+
+function returnHasCreationAudit(ret){
+  const globalAudit = (state.audit || []).some(log =>
+    String(log.entityType || log.Entidade || '').toLowerCase().includes('devol') &&
+    String(log.entityId || log.ID || '') === String(ret.id || '') &&
+    String(log.action || log.Acao || '').toLowerCase() === 'devolução criada'
+  );
+  const localAudit = (ret.audit || []).some(log =>
+    String(log.action || log.Acao || '').toLowerCase() === 'devolução criada'
+  );
+  return globalAudit || localAudit;
+}
+
+function hasAnyCreationAudit(){
+  return (state.audit || []).some(log => String(log.action || log.Acao || '').toLowerCase() === 'devolução criada');
+}
+
+function isGhostReturn(ret){
+  if(!ret) return false;
+  if(isReturnDeletedOrCanceled(ret)) return true;
+  if(!hasAnyCreationAudit()) return false;
+  if(returnHasCreationAudit(ret)) return false;
+  const hasInvoice = !!(ret.invoice && ret.invoice.accessKey);
+  const hasItems = Array.isArray(ret.items) && ret.items.length > 0;
+  const hasCode = !!ret.code;
+  return hasCode || hasInvoice || hasItems;
+}
+
+function findGhostReturns(){
+  return (state.returns || []).filter(isGhostReturn);
+}
+
+function cleanupGhostReturns(options={}){
+  const silent = !!options.silent;
+  const ghosts = findGhostReturns();
+  if(!ghosts.length){
+    if(!silent) alert('Nenhum registro fantasma encontrado.');
+    return 0;
+  }
+  if(!silent){
+    const list = ghosts.slice(0,10).map(r => `${r.code || r.id || 'sem código'} · NF ${r.invoice?.number || '-'} · chave ${r.invoice?.accessKey || '-'}`).join('\n');
+    const more = ghosts.length > 10 ? `\n...e mais ${ghosts.length - 10} registro(s).` : '';
+    const ok = confirm(`Foram encontrados ${ghosts.length} registro(s) fantasma(s) ou oculto(s) que podem bloquear novas devoluções.\n\n${list}${more}\n\nDeseja remover estes registros do armazenamento local?`);
+    if(!ok) return 0;
+  }
+  const ghostIds = new Set(ghosts.map(r => r.id));
+  state.returns = (state.returns || []).filter(r => !ghostIds.has(r.id));
+  try{
+    addAudit('Registros fantasmas removidos', 'manutenção', 'returns', ghosts.map(r => r.code || r.id).join(', '));
+  }catch(e){}
+  save();
+  if(!silent) alert(`${ghosts.length} registro(s) fantasma(s) removido(s).`);
+  return ghosts.length;
+}
+
+function findActiveReturnByInvoiceKey(accessKey){
+  const key = cleanDigits(accessKey);
+  if(!key) return null;
+  cleanupGhostReturns({silent:true});
+  return (state.returns || []).find(r =>
+    cleanDigits(r.invoice?.accessKey) === key &&
+    !isReturnDeletedOrCanceled(r) &&
+    !isGhostReturn(r)
+  );
+}
+
 function defaultWarehouses(){
   return [
     {id:uid('wh'), name:'Estoque principal', type:'Armazém', responsible:'Estoque', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'São Paulo', state:'SP', notes:'Destino padrão para itens aprovados.', is_active:true, created_at:nowIso(), updated_at:nowIso()},
@@ -1150,36 +1237,10 @@ function createReturn(event){
   }
 
   if(state.rules.blockDuplicateInvoice && invoice.accessKey){
-    const normalizedKey = cleanDigits(invoice.accessKey);
-    const exists = state.returns.find(r => {
-      if(!r) return false;
-      const sameKey = cleanDigits(r.invoice?.accessKey) === normalizedKey;
-      if(!sameKey) return false;
-
-      // Ignora registros que não fazem parte da operação ativa.
-      // Isso corrige casos de registros antigos/fantasmas no localStorage,
-      // como devoluções excluídas, canceladas, ocultas ou incompletas.
-      const deletedFlags = [
-        r.isDeleted, r.is_deleted, r.deleted, r.removed,
-        r.deleted_at, r.deletedAt, r.deleted_by, r.deletedBy
-      ].some(Boolean);
-      const status = String(r.status || '').toLowerCase();
-      const inactiveStatus = ['cancelado','cancelada','excluido','excluída','excluida','deletado','deletada','removido','removida'].some(x => status.includes(x));
-      return !deletedFlags && !inactiveStatus;
-    });
-
+    const exists = findActiveReturnByInvoiceKey(invoice.accessKey);
     if(exists){
-      const proceed = confirm(
-        `Nota fiscal já vinculada ao processo ${exists.code || 'sem código'}.\n\n` +
-        `Se esse processo não aparece mais nos registros ou foi criado incorretamente, clique em OK para continuar mesmo assim.\n` +
-        `Clique em Cancelar para revisar antes de criar.`
-      );
-
-      // Cancelar bloqueia. OK continua normalmente com a criação da nova devolução.
-      if(!proceed){
-        return;
-      }
-      addAudit('Duplicidade de NF-e ignorada manualmente', 'devolução', exists.id || exists.code || '', `NF-e ${normalizedKey} liberada para novo cadastro pelo usuário.`);
+      alert(`Nota fiscal já vinculada ao processo ${exists.code}.`);
+      return;
     }
   }
 
@@ -2826,8 +2887,10 @@ function renderSettings(){
           </table>
         </div>
         <div class="row-actions" style="margin-top:14px">
+          <button class="btn warning" onclick="cleanupGhostReturns(); render()">Remover registros fantasmas</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
+        <p class="hint" style="margin-top:10px">Use “Remover registros fantasmas” quando uma NF-e ficar bloqueada por uma devolução que não aparece mais nos registros operacionais.</p>
       </div>
     </section>
     <div class="card" style="margin-top:18px">
