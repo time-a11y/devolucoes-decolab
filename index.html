@@ -1150,20 +1150,36 @@ function createReturn(event){
   }
 
   if(state.rules.blockDuplicateInvoice && invoice.accessKey){
-    const normalizedInvoiceKey = cleanDigits(invoice.accessKey);
-    const operationalReturns = state.returns.filter(r => {
-      const deletedFlag = !!(r.isDeleted || r.is_deleted || r.deleted_at || r.deletedAt || r.deletedAtLocal);
-      const canceledFlag = ['Cancelado','Excluído','Excluída','Deletado','Deletada'].includes(String(r.status || ''));
-      return !deletedFlag && !canceledFlag;
-    });
-    const exists = operationalReturns.find(r => cleanDigits(r.invoice?.accessKey) === normalizedInvoiceKey);
-    if(exists){
-      const proceed = confirm(`Nota fiscal já vinculada ao processo ${exists.code}.
+    const normalizedKey = cleanDigits(invoice.accessKey);
+    const exists = state.returns.find(r => {
+      if(!r) return false;
+      const sameKey = cleanDigits(r.invoice?.accessKey) === normalizedKey;
+      if(!sameKey) return false;
 
-Se esse processo não aparece mais nos registros ou foi criado incorretamente, clique em OK para continuar mesmo assim.
-Clique em Cancelar para revisar antes de criar.`);
-      if(!proceed) return;
-      addAudit('Duplicidade de NF-e ignorada manualmente', 'devolução', exists.id || exists.code || normalizedInvoiceKey, `Chave ${normalizedInvoiceKey} já constava em ${exists.code}, mas o usuário optou por continuar.`);
+      // Ignora registros que não fazem parte da operação ativa.
+      // Isso corrige casos de registros antigos/fantasmas no localStorage,
+      // como devoluções excluídas, canceladas, ocultas ou incompletas.
+      const deletedFlags = [
+        r.isDeleted, r.is_deleted, r.deleted, r.removed,
+        r.deleted_at, r.deletedAt, r.deleted_by, r.deletedBy
+      ].some(Boolean);
+      const status = String(r.status || '').toLowerCase();
+      const inactiveStatus = ['cancelado','cancelada','excluido','excluída','excluida','deletado','deletada','removido','removida'].some(x => status.includes(x));
+      return !deletedFlags && !inactiveStatus;
+    });
+
+    if(exists){
+      const proceed = confirm(
+        `Nota fiscal já vinculada ao processo ${exists.code || 'sem código'}.\n\n` +
+        `Se esse processo não aparece mais nos registros ou foi criado incorretamente, clique em OK para continuar mesmo assim.\n` +
+        `Clique em Cancelar para revisar antes de criar.`
+      );
+
+      // Cancelar bloqueia. OK continua normalmente com a criação da nova devolução.
+      if(!proceed){
+        return;
+      }
+      addAudit('Duplicidade de NF-e ignorada manualmente', 'devolução', exists.id || exists.code || '', `NF-e ${normalizedKey} liberada para novo cadastro pelo usuário.`);
     }
   }
 
