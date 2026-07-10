@@ -1150,7 +1150,11 @@ function createReturn(event){
   }
 
   if(state.rules.blockDuplicateInvoice && invoice.accessKey){
-    const exists = state.returns.find(r => r.invoice?.accessKey === invoice.accessKey && r.status !== 'Cancelado');
+    const currentKey = cleanDigits(invoice.accessKey);
+    const exists = state.returns.find(r => {
+      const savedKey = cleanDigits(r.invoice?.accessKey);
+      return savedKey === currentKey && !r.isDeleted && r.status !== 'Cancelado';
+    });
     if(exists){
       alert(`Nota fiscal já vinculada ao processo ${exists.code}.`);
       return;
