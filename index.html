@@ -1150,14 +1150,20 @@ function createReturn(event){
   }
 
   if(state.rules.blockDuplicateInvoice && invoice.accessKey){
-    const currentKey = cleanDigits(invoice.accessKey);
-    const exists = state.returns.find(r => {
-      const savedKey = cleanDigits(r.invoice?.accessKey);
-      return savedKey === currentKey && !r.isDeleted && r.status !== 'Cancelado';
+    const normalizedInvoiceKey = cleanDigits(invoice.accessKey);
+    const operationalReturns = state.returns.filter(r => {
+      const deletedFlag = !!(r.isDeleted || r.is_deleted || r.deleted_at || r.deletedAt || r.deletedAtLocal);
+      const canceledFlag = ['Cancelado','Excluído','Excluída','Deletado','Deletada'].includes(String(r.status || ''));
+      return !deletedFlag && !canceledFlag;
     });
+    const exists = operationalReturns.find(r => cleanDigits(r.invoice?.accessKey) === normalizedInvoiceKey);
     if(exists){
-      alert(`Nota fiscal já vinculada ao processo ${exists.code}.`);
-      return;
+      const proceed = confirm(`Nota fiscal já vinculada ao processo ${exists.code}.
+
+Se esse processo não aparece mais nos registros ou foi criado incorretamente, clique em OK para continuar mesmo assim.
+Clique em Cancelar para revisar antes de criar.`);
+      if(!proceed) return;
+      addAudit('Duplicidade de NF-e ignorada manualmente', 'devolução', exists.id || exists.code || normalizedInvoiceKey, `Chave ${normalizedInvoiceKey} já constava em ${exists.code}, mas o usuário optou por continuar.`);
     }
   }
 
