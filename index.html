@@ -574,19 +574,69 @@ function loadState(){
   return structuredClone(initialState);
 }
 
-function save(){
-  localStorage.setItem(APP_KEY, JSON.stringify({
+function buildPersistedState(){
+  return {
     users: state.users,
     session: state.session,
     route: state.route,
     currentReturnId: state.currentReturnId,
-    returns: state.returns,
+    returns: sanitizeReturnsForLocalStorage(state.returns),
     audit: state.audit,
     rules: state.rules,
     filters: state.filters,
     warehouses: state.warehouses,
     transfers: state.transfers
+  };
+}
+
+function sanitizeReturnsForLocalStorage(returns){
+  return (returns || []).map(ret => ({
+    ...ret,
+    items: (ret.items || []).map(item => ({
+      ...item,
+      evidences: (item.evidences || []).map(ev => sanitizeEvidenceForLocalStorage(ev))
+    }))
   }));
+}
+
+function sanitizeEvidenceForLocalStorage(ev){
+  const clean = {...ev};
+  const heavyFields = ['preview','thumbnail','thumbnailData','previewData','dataUrl','base64','file_base64','compressed_base64','original_base64'];
+  heavyFields.forEach(field => {
+    if(typeof clean[field] === 'string' && clean[field].startsWith('data:')){
+      delete clean[field];
+      clean.local_preview_removed = true;
+    }
+  });
+  if(clean.preview && typeof clean.preview === 'string' && clean.preview.startsWith('blob:')){
+    delete clean.preview;
+    clean.local_preview_removed = true;
+  }
+  return clean;
+}
+
+function forceOptimizeStateForStorage(){
+  state.returns = sanitizeReturnsForLocalStorage(state.returns);
+  state.audit = (state.audit || []).slice(0, 500);
+}
+
+function save(){
+  const payload = buildPersistedState();
+  try{
+    localStorage.setItem(APP_KEY, JSON.stringify(payload));
+  }catch(e){
+    if(e && (e.name === 'QuotaExceededError' || String(e.message || '').includes('exceeded the quota'))){
+      forceOptimizeStateForStorage();
+      const compactPayload = buildPersistedState();
+      try{
+        localStorage.setItem(APP_KEY, JSON.stringify(compactPayload));
+      }catch(e2){
+        console.warn('Não foi possível salvar no armazenamento local mesmo após otimização:', e2);
+      }
+    }else{
+      console.warn('Falha ao salvar estado local:', e);
+    }
+  }
 }
 
 function uid(prefix='id'){
@@ -1698,22 +1748,18 @@ function handleEvidenceUpload(input, retId, itemId){
       uploadedAt: nowIso(),
       preview: ''
     };
-    const reader = new FileReader();
-    reader.onload = function(){
-      if(file.type.startsWith('image/') && file.size < 900000){
-        ev.preview = String(reader.result || '');
+    try{
+      if(file.type.startsWith('image/')){
+        ev.preview = URL.createObjectURL(file);
+        ev.localObjectPreview = true;
       }
       item.evidences.push(ev);
       addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
-      pending--;
-      if(pending === 0) render();
-    };
-    reader.onerror = function(){
+    }catch(e){
       item.evidences.push(ev);
-      pending--;
-      if(pending === 0) render();
-    };
-    reader.readAsDataURL(file);
+    }
+    pending--;
+    if(pending === 0) render();
   });
 }
 
@@ -2887,6 +2933,8 @@ function renderSettings(){
           </table>
         </div>
         <div class="row-actions" style="margin-top:14px">
+          <button class="btn" onclick="optimizeLocalStorageNow()">Otimizar armazenamento local</button>
+          <button class="btn" onclick="showLocalStorageUsage()">Ver uso local</button>
           <button class="btn warning" onclick="cleanupGhostReturns(); render()">Remover registros fantasmas</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
@@ -2909,6 +2957,20 @@ function updateRule(key,value){
   state.rules[key] = value;
   addAudit('Regra de negócio alterada', 'configuração', key, String(value));
   save();
+}
+
+function optimizeLocalStorageNow(){
+  const before = localStorage.getItem(APP_KEY)?.length || 0;
+  forceOptimizeStateForStorage();
+  save();
+  const after = localStorage.getItem(APP_KEY)?.length || 0;
+  alert(`Armazenamento otimizado.\nAntes: ${(before/1024/1024).toFixed(2)} MB\nDepois: ${(after/1024/1024).toFixed(2)} MB\n\nAs devoluções, itens, auditoria e vínculos foram mantidos. Apenas previews locais pesados foram removidos.`);
+  render();
+}
+
+function showLocalStorageUsage(){
+  const raw = localStorage.getItem(APP_KEY) || '';
+  alert(`Uso aproximado do armazenamento local: ${(raw.length/1024/1024).toFixed(2)} MB.`);
 }
 
 function resetApp(){
