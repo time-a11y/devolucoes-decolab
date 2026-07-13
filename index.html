@@ -468,93 +468,6 @@ function ensureStateExtensions(){
   state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
 }
 
-function normalizedReturnStatus(value){
-  return String(value || '').trim().toLowerCase();
-}
-
-function isReturnDeletedOrCanceled(ret){
-  const status = normalizedReturnStatus(ret.status);
-  return !!(
-    ret.isDeleted ||
-    ret.is_deleted ||
-    ret.deleted ||
-    ret.deleted_at ||
-    ret.deletedAt ||
-    ret.removed ||
-    status === 'cancelado' ||
-    status === 'cancelada' ||
-    status === 'excluído' ||
-    status === 'excluída' ||
-    status === 'excluido' ||
-    status === 'excluida'
-  );
-}
-
-function returnHasCreationAudit(ret){
-  const globalAudit = (state.audit || []).some(log =>
-    String(log.entityType || log.Entidade || '').toLowerCase().includes('devol') &&
-    String(log.entityId || log.ID || '') === String(ret.id || '') &&
-    String(log.action || log.Acao || '').toLowerCase() === 'devolução criada'
-  );
-  const localAudit = (ret.audit || []).some(log =>
-    String(log.action || log.Acao || '').toLowerCase() === 'devolução criada'
-  );
-  return globalAudit || localAudit;
-}
-
-function hasAnyCreationAudit(){
-  return (state.audit || []).some(log => String(log.action || log.Acao || '').toLowerCase() === 'devolução criada');
-}
-
-function isGhostReturn(ret){
-  if(!ret) return false;
-  if(isReturnDeletedOrCanceled(ret)) return true;
-  if(!hasAnyCreationAudit()) return false;
-  if(returnHasCreationAudit(ret)) return false;
-  const hasInvoice = !!(ret.invoice && ret.invoice.accessKey);
-  const hasItems = Array.isArray(ret.items) && ret.items.length > 0;
-  const hasCode = !!ret.code;
-  return hasCode || hasInvoice || hasItems;
-}
-
-function findGhostReturns(){
-  return (state.returns || []).filter(isGhostReturn);
-}
-
-function cleanupGhostReturns(options={}){
-  const silent = !!options.silent;
-  const ghosts = findGhostReturns();
-  if(!ghosts.length){
-    if(!silent) alert('Nenhum registro fantasma encontrado.');
-    return 0;
-  }
-  if(!silent){
-    const list = ghosts.slice(0,10).map(r => `${r.code || r.id || 'sem código'} · NF ${r.invoice?.number || '-'} · chave ${r.invoice?.accessKey || '-'}`).join('\n');
-    const more = ghosts.length > 10 ? `\n...e mais ${ghosts.length - 10} registro(s).` : '';
-    const ok = confirm(`Foram encontrados ${ghosts.length} registro(s) fantasma(s) ou oculto(s) que podem bloquear novas devoluções.\n\n${list}${more}\n\nDeseja remover estes registros do armazenamento local?`);
-    if(!ok) return 0;
-  }
-  const ghostIds = new Set(ghosts.map(r => r.id));
-  state.returns = (state.returns || []).filter(r => !ghostIds.has(r.id));
-  try{
-    addAudit('Registros fantasmas removidos', 'manutenção', 'returns', ghosts.map(r => r.code || r.id).join(', '));
-  }catch(e){}
-  save();
-  if(!silent) alert(`${ghosts.length} registro(s) fantasma(s) removido(s).`);
-  return ghosts.length;
-}
-
-function findActiveReturnByInvoiceKey(accessKey){
-  const key = cleanDigits(accessKey);
-  if(!key) return null;
-  cleanupGhostReturns({silent:true});
-  return (state.returns || []).find(r =>
-    cleanDigits(r.invoice?.accessKey) === key &&
-    !isReturnDeletedOrCanceled(r) &&
-    !isGhostReturn(r)
-  );
-}
-
 function defaultWarehouses(){
   return [
     {id:uid('wh'), name:'Estoque principal', type:'Armazém', responsible:'Estoque', phone:'', email:'', zip_code:'', address:'', number:'', complement:'', district:'', city:'São Paulo', state:'SP', notes:'Destino padrão para itens aprovados.', is_active:true, created_at:nowIso(), updated_at:nowIso()},
@@ -574,69 +487,19 @@ function loadState(){
   return structuredClone(initialState);
 }
 
-function buildPersistedState(){
-  return {
+function save(){
+  localStorage.setItem(APP_KEY, JSON.stringify({
     users: state.users,
     session: state.session,
     route: state.route,
     currentReturnId: state.currentReturnId,
-    returns: sanitizeReturnsForLocalStorage(state.returns),
+    returns: state.returns,
     audit: state.audit,
     rules: state.rules,
     filters: state.filters,
     warehouses: state.warehouses,
     transfers: state.transfers
-  };
-}
-
-function sanitizeReturnsForLocalStorage(returns){
-  return (returns || []).map(ret => ({
-    ...ret,
-    items: (ret.items || []).map(item => ({
-      ...item,
-      evidences: (item.evidences || []).map(ev => sanitizeEvidenceForLocalStorage(ev))
-    }))
   }));
-}
-
-function sanitizeEvidenceForLocalStorage(ev){
-  const clean = {...ev};
-  const heavyFields = ['preview','thumbnail','thumbnailData','previewData','dataUrl','base64','file_base64','compressed_base64','original_base64'];
-  heavyFields.forEach(field => {
-    if(typeof clean[field] === 'string' && clean[field].startsWith('data:')){
-      delete clean[field];
-      clean.local_preview_removed = true;
-    }
-  });
-  if(clean.preview && typeof clean.preview === 'string' && clean.preview.startsWith('blob:')){
-    delete clean.preview;
-    clean.local_preview_removed = true;
-  }
-  return clean;
-}
-
-function forceOptimizeStateForStorage(){
-  state.returns = sanitizeReturnsForLocalStorage(state.returns);
-  state.audit = (state.audit || []).slice(0, 500);
-}
-
-function save(){
-  const payload = buildPersistedState();
-  try{
-    localStorage.setItem(APP_KEY, JSON.stringify(payload));
-  }catch(e){
-    if(e && (e.name === 'QuotaExceededError' || String(e.message || '').includes('exceeded the quota'))){
-      forceOptimizeStateForStorage();
-      const compactPayload = buildPersistedState();
-      try{
-        localStorage.setItem(APP_KEY, JSON.stringify(compactPayload));
-      }catch(e2){
-        console.warn('Não foi possível salvar no armazenamento local mesmo após otimização:', e2);
-      }
-    }else{
-      console.warn('Falha ao salvar estado local:', e);
-    }
-  }
 }
 
 function uid(prefix='id'){
@@ -1287,7 +1150,7 @@ function createReturn(event){
   }
 
   if(state.rules.blockDuplicateInvoice && invoice.accessKey){
-    const exists = findActiveReturnByInvoiceKey(invoice.accessKey);
+    const exists = state.returns.find(r => r.invoice?.accessKey === invoice.accessKey && r.status !== 'Cancelado');
     if(exists){
       alert(`Nota fiscal já vinculada ao processo ${exists.code}.`);
       return;
@@ -1748,30 +1611,49 @@ function handleEvidenceUpload(input, retId, itemId){
       uploadedAt: nowIso(),
       preview: ''
     };
-    try{
-      if(file.type.startsWith('image/')){
-        ev.preview = URL.createObjectURL(file);
-        ev.localObjectPreview = true;
+    const reader = new FileReader();
+    reader.onload = function(){
+      if(file.type.startsWith('image/') && file.size < 900000){
+        ev.preview = String(reader.result || '');
       }
       item.evidences.push(ev);
       addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
-    }catch(e){
+      pending--;
+      if(pending === 0) render();
+    };
+    reader.onerror = function(){
       item.evidences.push(ev);
-    }
-    pending--;
-    if(pending === 0) render();
+      pending--;
+      if(pending === 0) render();
+    };
+    reader.readAsDataURL(file);
   });
+}
+
+function evidenceUrl(ev){
+  return ev?.preview || ev?.thumbnail_url || ev?.file_url || ev?.public_url || ev?.url || ev?.download_url || '';
+}
+
+function evidenceIsImage(ev){
+  const type = String(ev?.type || ev?.mime_type || '').toLowerCase();
+  const name = String(ev?.name || ev?.original_name || ev?.file_name || '').toLowerCase();
+  return type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(name);
+}
+
+function evidenceBrokenFallback(label='IMG'){
+  return `this.outerHTML='<div class=&quot;file-icon&quot;>${esc(label)}</div>'`;
 }
 
 function renderEvidence(list){
   if(!list.length) return '<p class="hint">Nenhuma evidência anexada para este item.</p>';
   return `<div class="evidence-grid">${list.map(ev => {
-    const src = ev.preview || ev.thumbnail_url || ev.file_url || ev.public_url || ev.url || '';
-    const isImg = src && String(ev.type || ev.mime_type || '').startsWith('image/');
+    const src = evidenceUrl(ev);
+    const isImg = evidenceIsImage(ev) && src;
+    const ext = String(ev.name || ev.original_name || ev.file_name || 'arquivo').split('.').pop() || 'file';
     return `<div class="evidence">
       <strong>${esc(ev.name || ev.original_name || ev.file_name || 'Evidência')}</strong><br>
       <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${ev.uploaded_from==='mobile_qr'?'· QR Code':''}</span>
-      ${isImg ? `<img src="${esc(src)}" alt="Evidência">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : '')}
+      ${isImg ? `<img src="${esc(src)}" alt="Evidência" onerror="${evidenceBrokenFallback('IMG')}">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : `<p class="hint">Preview indisponível. Sincronize ou reenvie a evidência se precisar visualizar a imagem.</p>`)}
     </div>`;
   }).join('')}</div>`;
 }
@@ -1844,6 +1726,7 @@ function renderDestination(ret){
           <p>O sistema sugere o destino com base em quantidade, status, integridade, embalagem e regras configuradas.</p>
         </div>
         <div class="row-actions">
+          <button class="btn" onclick="goBackToInspection('${ret.id}')">Voltar para inspeção</button>
           <button class="btn" onclick="const r=getReturn('${ret.id}'); applyDecisionEngine(r,true)">Recalcular regras</button>
           <button class="btn primary" onclick="goSummary('${ret.id}')">Gerar resumo</button>
         </div>
@@ -1887,7 +1770,17 @@ function renderDestinationItem(ret,item){
             ${item.approvalStatus ? `<span class="badge ${item.approvalStatus==='Aprovado'?'green':'red'}">${esc(item.approvalStatus)}</span>` : ''}
           </div>
         </div>
+        <div class="field">
+          <label>Evidência do destino</label>
+          <div class="row-actions" style="margin-bottom:8px">
+            <button type="button" class="btn small" onclick="openEvidenceQr('item','${ret.id}','${item.id}','${item.destination || 'Produto recebido'}')">Enviar pelo celular via QR</button>
+            <button type="button" class="btn small" onclick="document.getElementById('destEvidence_${item.id}').click()">Anexar arquivo</button>
+          </div>
+          <input id="destEvidence_${item.id}" type="file" multiple accept="image/*,video/*,.pdf,.xml,.csv,.xlsx" style="display:none" onchange="handleEvidenceUpload(this,'${ret.id}','${item.id}')">
+          <span class="hint">${(item.evidences || []).length} evidência(s) anexada(s).</span>
+        </div>
       </div>
+      ${renderEvidence(item.evidences || [])}
       ${!evidenceOk ? `<div class="alert critica"><strong>!</strong><div>Destino crítico sem evidência mínima. Anexe pelo menos ${state.rules.minCriticalPhotos} arquivo(s).</div></div>` : ''}
       ${item.requiresApproval ? `
         <div class="row-actions" style="margin-top:12px">
@@ -1898,6 +1791,16 @@ function renderDestinationItem(ret,item){
       ` : ''}
     </div>
   `;
+}
+
+
+function goBackToInspection(retId){
+  const ret = getReturn(retId);
+  if(!ret) return;
+  ret.status = 'Aguardando inspeção';
+  ret.updatedAt = nowIso();
+  addReturnAudit(ret, 'Retorno para inspeção', 'Usuário retornou para anexar evidências ou ajustar inspeção antes do resumo.');
+  render();
 }
 
 function overrideDestination(retId,itemId,value){
@@ -1935,7 +1838,11 @@ function goSummary(retId){
   }
   const criticalWithoutEvidence = ret.items.filter(i => ['Descarte','Contestação','Quarentena'].includes(i.destination) && (i.evidences || []).length < Number(state.rules.minCriticalPhotos || 1));
   if(criticalWithoutEvidence.length){
-    alert('Existem itens críticos sem evidência mínima.');
+    const skus = criticalWithoutEvidence.map(i => i.sku || i.description || 'item').join(', ');
+    alert('Existem itens críticos sem evidência mínima: ' + skus + '. Use o botão de evidência nesta tela ou volte para inspeção.');
+    ret.status = 'Aguardando destino';
+    addReturnAudit(ret, 'Resumo bloqueado por falta de evidência', skus);
+    render();
     return;
   }
   ret.status = aggregateStatus(ret);
@@ -2829,9 +2736,9 @@ function exportTransfersCsv(){
 
 function renderEvidenceCenter(){
   const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
-  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>`<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${String(e.type||'').startsWith('image')||e.preview?`<img src="${esc(e.preview || e.file_url)}" alt="">`:`<div class="file-icon">${esc((e.name||'Arquivo').split('.').pop()||'file')}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}</span></div></div>`).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><div class="row-actions"><button class="btn" onclick="fetchSupabaseEvidences({rerender:true})">Sincronizar Supabase</button><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>{ const url=evidenceUrl(e); const isImg=evidenceIsImage(e)&&url; const ext=String(e.name||e.original_name||e.file_name||'Arquivo').split('.').pop()||'file'; return `<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${isImg?`<img src="${esc(url)}" alt="" onerror="${evidenceBrokenFallback('IMG')}">`:`<div class="file-icon">${esc(ext)}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}${!url?' · sem preview':''}</span></div></div>` }).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
 }
-function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=e.preview||e.file_url||e.thumbnail_url||''; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${url?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc">`:empty('Arquivo sem preview.')}<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
+function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=evidenceUrl(e); const isImg=evidenceIsImage(e)&&url; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||e.original_name||e.file_name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${isImg?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc" onerror="this.outerHTML='<div class=&quot;empty&quot;>Preview indisponível ou arquivo antigo corrompido. Reenvie a evidência se precisar visualizar a imagem.</div>'">`:empty(url?'Arquivo sem preview de imagem. Use o botão Abrir/Baixar.':'Preview indisponível. Evidências antigas podem ter ficado apenas como metadados após a limpeza do armazenamento local.') }<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
 function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
 
 function renderReports(){
@@ -2933,12 +2840,8 @@ function renderSettings(){
           </table>
         </div>
         <div class="row-actions" style="margin-top:14px">
-          <button class="btn" onclick="optimizeLocalStorageNow()">Otimizar armazenamento local</button>
-          <button class="btn" onclick="showLocalStorageUsage()">Ver uso local</button>
-          <button class="btn warning" onclick="cleanupGhostReturns(); render()">Remover registros fantasmas</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
-        <p class="hint" style="margin-top:10px">Use “Remover registros fantasmas” quando uma NF-e ficar bloqueada por uma devolução que não aparece mais nos registros operacionais.</p>
       </div>
     </section>
     <div class="card" style="margin-top:18px">
@@ -2957,20 +2860,6 @@ function updateRule(key,value){
   state.rules[key] = value;
   addAudit('Regra de negócio alterada', 'configuração', key, String(value));
   save();
-}
-
-function optimizeLocalStorageNow(){
-  const before = localStorage.getItem(APP_KEY)?.length || 0;
-  forceOptimizeStateForStorage();
-  save();
-  const after = localStorage.getItem(APP_KEY)?.length || 0;
-  alert(`Armazenamento otimizado.\nAntes: ${(before/1024/1024).toFixed(2)} MB\nDepois: ${(after/1024/1024).toFixed(2)} MB\n\nAs devoluções, itens, auditoria e vínculos foram mantidos. Apenas previews locais pesados foram removidos.`);
-  render();
-}
-
-function showLocalStorageUsage(){
-  const raw = localStorage.getItem(APP_KEY) || '';
-  alert(`Uso aproximado do armazenamento local: ${(raw.length/1024/1024).toFixed(2)} MB.`);
 }
 
 function resetApp(){
