@@ -463,6 +463,8 @@ function ensureStateExtensions(){
   if(!state.filters.stockView) state.filters.stockView = 'sku';
   if(!state.filters.transferSearch) state.filters.transferSearch = '';
   if(!state.filters.transferTab) state.filters.transferTab = 'transfers';
+  if(!state.filters.evidenceSearch) state.filters.evidenceSearch = '';
+  if(!state.filters.evidenceLimit) state.filters.evidenceLimit = 30;
   state.warehouses = state.warehouses || defaultWarehouses();
   state.transfers = (state.transfers || []).map(t => ({...t, operational_status: t.operational_status || 'packing', mkt_shipment_id: t.mkt_shipment_id || ''}));
   state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
@@ -487,8 +489,17 @@ function loadState(){
   return structuredClone(initialState);
 }
 
+function sanitizeForLocalStorage(value){
+  const cloned = structuredClone(value);
+  (cloned.returns || []).forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => {
+    if(ev.preview && String(ev.preview).startsWith('data:')) ev.preview = '';
+    if(ev.localObjectUrl) delete ev.localObjectUrl;
+  })));
+  return cloned;
+}
+
 function save(){
-  localStorage.setItem(APP_KEY, JSON.stringify({
+  const payload = sanitizeForLocalStorage({
     users: state.users,
     session: state.session,
     route: state.route,
@@ -499,7 +510,17 @@ function save(){
     filters: state.filters,
     warehouses: state.warehouses,
     transfers: state.transfers
-  }));
+  });
+  try{
+    localStorage.setItem(APP_KEY, JSON.stringify(payload));
+  }catch(e){
+    if(String(e && e.message || e).includes('quota') || String(e && e.name || '').includes('Quota')){
+      optimizeLocalStorage(false);
+      localStorage.setItem(APP_KEY, JSON.stringify(sanitizeForLocalStorage(payload)));
+    }else{
+      throw e;
+    }
+  }
 }
 
 function uid(prefix='id'){
@@ -586,6 +607,7 @@ function render(){
       </main>
     </div>
   `;
+  setTimeout(hydrateLocalEvidenceImages, 0);
 }
 
 function renderLogin(){
@@ -1594,14 +1616,86 @@ function updateItemNoRender(retId,itemId,field,value){
   save();
 }
 
-function handleEvidenceUpload(input, retId, itemId){
+
+const LOCAL_EVIDENCE_DB = 'returnflow_local_evidences_v1';
+const LOCAL_EVIDENCE_STORE = 'files';
+let localEvidenceDbPromise = null;
+const localEvidenceObjectUrls = new Map();
+
+function openLocalEvidenceDb(){
+  if(localEvidenceDbPromise) return localEvidenceDbPromise;
+  localEvidenceDbPromise = new Promise((resolve,reject)=>{
+    const req = indexedDB.open(LOCAL_EVIDENCE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(LOCAL_EVIDENCE_STORE)) db.createObjectStore(LOCAL_EVIDENCE_STORE, {keyPath:'id'});
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return localEvidenceDbPromise;
+}
+
+async function saveLocalEvidenceBlob(id, file){
+  const db = await openLocalEvidenceDb();
+  await new Promise((resolve,reject)=>{
+    const tx = db.transaction(LOCAL_EVIDENCE_STORE, 'readwrite');
+    tx.objectStore(LOCAL_EVIDENCE_STORE).put({id, blob:file, name:file.name, type:file.type, size:file.size, savedAt:nowIso()});
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getLocalEvidenceRecord(id){
+  const db = await openLocalEvidenceDb();
+  return await new Promise((resolve,reject)=>{
+    const tx = db.transaction(LOCAL_EVIDENCE_STORE, 'readonly');
+    const req = tx.objectStore(LOCAL_EVIDENCE_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getLocalEvidenceUrl(id){
+  if(localEvidenceObjectUrls.has(id)) return localEvidenceObjectUrls.get(id);
+  const rec = await getLocalEvidenceRecord(id);
+  if(!rec || !rec.blob) return '';
+  const url = URL.createObjectURL(rec.blob);
+  localEvidenceObjectUrls.set(id, url);
+  return url;
+}
+
+function blobToDataUrl(blob){
+  return new Promise((resolve,reject)=>{
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function hydrateLocalEvidenceImages(root=document){
+  root.querySelectorAll('[data-local-evidence]').forEach(async el => {
+    const id = el.getAttribute('data-local-evidence');
+    if(!id) return;
+    try{
+      const url = await getLocalEvidenceUrl(id);
+      if(url && el.tagName === 'IMG') el.src = url;
+      else if(url && el.tagName === 'A') el.href = url;
+      else if(!url && el.tagName === 'IMG') el.outerHTML = '<div class="file-icon">LOCAL</div>';
+    }catch(e){
+      if(el.tagName === 'IMG') el.outerHTML = '<div class="file-icon">LOCAL</div>';
+    }
+  });
+}
+
+async function handleEvidenceUpload(input, retId, itemId){
   const ret = getReturn(retId);
   const item = ret?.items.find(i => i.id === itemId);
   if(!item) return;
   const files = Array.from(input.files || []);
   if(!files.length) return;
-  let pending = files.length;
-  files.forEach(file => {
+  for(const file of files){
     const ev = {
       id: uid('ev'),
       name: file.name,
@@ -1609,29 +1703,34 @@ function handleEvidenceUpload(input, retId, itemId){
       size: file.size,
       uploadedBy: state.session.name,
       uploadedAt: nowIso(),
-      preview: ''
+      preview: '',
+      category: 'Evidência local',
+      uploaded_from: 'local_machine',
+      storage_mode: 'indexeddb_local',
+      local_blob_id: ''
     };
-    const reader = new FileReader();
-    reader.onload = function(){
-      if(file.type.startsWith('image/') && file.size < 900000){
-        ev.preview = String(reader.result || '');
-      }
-      item.evidences.push(ev);
-      addReturnAudit(ret, 'Evidência anexada', `${file.name} no SKU ${item.sku}`);
-      pending--;
-      if(pending === 0) render();
-    };
-    reader.onerror = function(){
-      item.evidences.push(ev);
-      pending--;
-      if(pending === 0) render();
-    };
-    reader.readAsDataURL(file);
-  });
+    try{
+      ev.local_blob_id = ev.id;
+      await saveLocalEvidenceBlob(ev.id, file);
+    }catch(e){
+      console.warn('Falha ao salvar arquivo local no IndexedDB:', e);
+      ev.storage_mode = 'metadata_only';
+      ev.local_blob_id = '';
+    }
+    item.evidences.push(ev);
+    addReturnAudit(ret, 'Evidência anexada localmente', `${file.name} no SKU ${item.sku}`);
+  }
+  input.value = '';
+  render();
 }
 
 function evidenceUrl(ev){
+  if(ev?.local_blob_id) return '';
   return ev?.preview || ev?.thumbnail_url || ev?.file_url || ev?.public_url || ev?.url || ev?.download_url || '';
+}
+
+function evidenceRemoteUrl(ev){
+  return ev?.thumbnail_url || ev?.file_url || ev?.public_url || ev?.url || ev?.download_url || '';
 }
 
 function evidenceIsImage(ev){
@@ -1648,12 +1747,13 @@ function renderEvidence(list){
   if(!list.length) return '<p class="hint">Nenhuma evidência anexada para este item.</p>';
   return `<div class="evidence-grid">${list.map(ev => {
     const src = evidenceUrl(ev);
+    const isLocalImg = ev.local_blob_id && evidenceIsImage(ev);
     const isImg = evidenceIsImage(ev) && src;
     const ext = String(ev.name || ev.original_name || ev.file_name || 'arquivo').split('.').pop() || 'file';
     return `<div class="evidence">
       <strong>${esc(ev.name || ev.original_name || ev.file_name || 'Evidência')}</strong><br>
-      <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${ev.uploaded_from==='mobile_qr'?'· QR Code':''}</span>
-      ${isImg ? `<img src="${esc(src)}" alt="Evidência" onerror="${evidenceBrokenFallback('IMG')}">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : `<p class="hint">Preview indisponível. Sincronize ou reenvie a evidência se precisar visualizar a imagem.</p>`)}
+      <span class="hint">${Math.round((ev.size || ev.file_size || 0)/1024)} KB · ${esc(ev.uploadedBy || ev.uploaded_by || '-')} ${ev.uploaded_from==='mobile_qr'?'· QR Code':ev.uploaded_from==='local_machine'?'· Local':''}</span>
+      ${isLocalImg ? `<img data-local-evidence="${esc(ev.local_blob_id)}" alt="Evidência local">` : isImg ? `<img src="${esc(src)}" alt="Evidência" onerror="${evidenceBrokenFallback('IMG')}">` : (src ? `<p><a href="${esc(src)}" target="_blank" rel="noopener">Abrir arquivo</a></p>` : `<p class="hint">Arquivo local salvo no navegador ou preview indisponível.</p>`)}
     </div>`;
   }).join('')}</div>`;
 }
@@ -2734,12 +2834,56 @@ function exportTransfersCsv(){
   download('transferencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
 }
 
-function renderEvidenceCenter(){
-  const all=[]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, sku:i.sku, product:i.description, returnId:r.id, itemId:i.id}))));
-  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Imagens e documentos anexados localmente ou via QR Code/Supabase.</p></div><div class="row-actions"><button class="btn" onclick="fetchSupabaseEvidences({rerender:true})">Sincronizar Supabase</button><button class="btn" onclick="exportEvidenceCsv()">Exportar CSV</button></div></div>${all.length?`<div class="evidence-gallery" style="margin-top:16px">${all.map(e=>{ const url=evidenceUrl(e); const isImg=evidenceIsImage(e)&&url; const ext=String(e.name||e.original_name||e.file_name||'Arquivo').split('.').pop()||'file'; return `<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')">${isImg?`<img src="${esc(url)}" alt="" onerror="${evidenceBrokenFallback('IMG')}">`:`<div class="file-icon">${esc(ext)}</div>`}<div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${brDate(e.uploadedAt)}${!url?' · sem preview':''}</span></div></div>` }).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+function collectEvidenceRows(){
+  const all=[];
+  state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, marketplace:r.marketplace, customerName:r.customerName, sku:i.sku, product:i.description, destination:i.destination, returnId:r.id, itemId:i.id}))));
+  return all.sort((a,b)=> new Date(b.uploadedAt || b.created_at || 0) - new Date(a.uploadedAt || a.created_at || 0));
 }
-function openEvidencePreview(returnId,itemId,eid){ const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return; const url=evidenceUrl(e); const isImg=evidenceIsImage(e)&&url; const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||e.original_name||e.file_name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${isImg?`<img src="${esc(url)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc" onerror="this.outerHTML='<div class=&quot;empty&quot;>Preview indisponível ou arquivo antigo corrompido. Reenvie a evidência se precisar visualizar a imagem.</div>'">`:empty(url?'Arquivo sem preview de imagem. Use o botão Abrir/Baixar.':'Preview indisponível. Evidências antigas podem ter ficado apenas como metadados após a limpeza do armazenamento local.') }<div class="row-actions" style="margin-top:14px">${url?`<a class="btn primary" href="${esc(url)}" target="_blank" download>Baixar / abrir</a>`:''}</div></div></div>`; document.body.insertAdjacentHTML('beforeend',html); }
-function exportEvidenceCsv(){ const rows=[['Devolucao','Pedido','SKU','Produto','Categoria','Arquivo','Usuario','Data','Origem']]; state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>rows.push([r.code,r.orderNumber,i.sku,i.description,e.category,e.name,e.uploadedBy,brDate(e.uploadedAt),e.uploaded_from||'local'])))); download('evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8'); }
+
+function renderEvidenceCenter(){
+  let all = collectEvidenceRows();
+  const q = String(state.filters.evidenceSearch || '').toLowerCase().trim();
+  if(q){
+    all = all.filter(e => [e.returnCode,e.orderNumber,e.marketplace,e.customerName,e.sku,e.product,e.category,e.name,e.original_name,e.file_name,e.destination,e.uploadedBy,e.uploaded_from].join(' ').toLowerCase().includes(q));
+  }
+  const limit = Number(state.filters.evidenceLimit || 30);
+  const visible = all.slice(0, limit);
+  return `<div class="card"><div class="split"><div><h2>Central de Evidências</h2><p>Galeria otimizada: não carrega imagens originais do Supabase automaticamente. Clique no card para abrir.</p></div><div class="row-actions"><button class="btn" onclick="fetchSupabaseEvidences({rerender:true, limit:30})">Sincronizar 30 recentes</button><button class="btn" onclick="exportEvidenceCsv()">Relatório CSV</button><button class="btn" onclick="exportEvidenceBackupJson()">Backup evidências locais</button></div></div><div class="form-grid two" style="margin-top:14px"><div class="field"><label>Pesquisar evidência</label><input placeholder="Buscar por devolução, SKU, produto, cliente, categoria..." value="${esc(state.filters.evidenceSearch||'')}" oninput="state.filters.evidenceSearch=this.value; save(); render()"></div><div class="field"><label>Quantidade exibida</label><select onchange="state.filters.evidenceLimit=Number(this.value); save(); render()">${[30,60,120,300,9999].map(n=>`<option value="${n}" ${limit===n?'selected':''}>${n===9999?'Todas (sem carregar originais)':n}</option>`).join('')}</select></div></div><p class="hint">Mostrando ${visible.length} de ${all.length} evidência(s). Arquivos locais ficam na máquina/navegador; arquivos do Supabase só são baixados ao abrir.</p>${visible.length?`<div class="evidence-gallery" style="margin-top:16px">${visible.map(e=>{ const local=e.local_blob_id; const remote=evidenceRemoteUrl(e); const ext=String(e.name||e.original_name||e.file_name||'Arquivo').split('.').pop()||'file'; const label=local?'LOCAL':(remote?'SUPABASE':ext); return `<div class="evidence-thumb" onclick="openEvidencePreview('${esc(e.returnId)}','${esc(e.itemId)}','${esc(e.id)}')"><div class="file-icon">${esc(label)}</div><div><strong>${esc(e.category||'Evidência')}</strong><br><span class="hint">${esc(e.returnCode)} · ${esc(e.sku)}<br>${esc(e.product||'')}<br>${brDate(e.uploadedAt)} · ${esc(e.uploaded_from||'local')}</span></div></div>` }).join('')}</div>`:empty('Nenhuma evidência encontrada.')}</div>`;
+}
+
+async function openEvidencePreview(returnId,itemId,eid){
+  const r=getReturn(returnId); const i=r?.items?.find(x=>x.id===itemId); const e=i?.evidences?.find(x=>x.id===eid || x.supabase_id===eid); if(!e) return;
+  const remote = evidenceRemoteUrl(e); const isImg=evidenceIsImage(e); const localId=e.local_blob_id || '';
+  const body = localId && isImg ? `<img data-local-evidence="${esc(localId)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc" alt="Evidência local">` : (isImg && remote ? `<img src="${esc(remote)}" style="width:100%;border-radius:18px;max-height:70vh;object-fit:contain;background:#f8fafc" onerror="this.outerHTML='<div class=&quot;empty&quot;>Preview indisponível ou arquivo antigo corrompido. Reenvie a evidência se precisar visualizar a imagem.</div>'">` : empty(remote?'Arquivo sem preview de imagem. Use o botão Abrir/Baixar.':'Preview indisponível. Evidência local pode estar neste navegador ou metadado antigo sem arquivo.'));
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal"><div class="modal-header"><div><h2>${esc(e.name||e.original_name||e.file_name||'Evidência')}</h2><p>${esc(e.category||'')} · ${brDate(e.uploadedAt)}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div>${body}<div class="row-actions" style="margin-top:14px">${localId?`<button class="btn primary" onclick="downloadLocalEvidence('${esc(localId)}','${esc(e.name||'evidencia')}')">Baixar arquivo local</button>`:''}${remote?`<a class="btn primary" href="${esc(remote)}" target="_blank" download>Baixar / abrir Supabase</a>`:''}</div></div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+  setTimeout(hydrateLocalEvidenceImages,0);
+}
+
+async function downloadLocalEvidence(id, name){
+  const rec = await getLocalEvidenceRecord(id);
+  if(!rec || !rec.blob){ alert('Arquivo local não encontrado neste navegador.'); return; }
+  const url = URL.createObjectURL(rec.blob);
+  const a=document.createElement('a'); a.href=url; a.download=name || rec.name || 'evidencia'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+function exportEvidenceCsv(){
+  const rows=[['Devolucao','Pedido','Marketplace','Cliente','SKU','Produto','Destino','Categoria','Arquivo','Usuario','Data','Origem','Armazenamento','Possui arquivo local','URL Supabase']];
+  collectEvidenceRows().forEach(e=>rows.push([e.returnCode,e.orderNumber,e.marketplace,e.customerName,e.sku,e.product,e.destination,e.category,e.name||e.original_name||e.file_name,e.uploadedBy||e.uploaded_by,brDate(e.uploadedAt),e.uploaded_from||'local',e.storage_mode || (e.local_blob_id?'local_indexeddb':evidenceRemoteUrl(e)?'supabase':'metadata'),e.local_blob_id?'sim':'não',evidenceRemoteUrl(e)]));
+  download('relatorio-evidencias.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
+}
+
+async function exportEvidenceBackupJson(){
+  const backup = {exported_at:nowIso(), app_key:APP_KEY, state:sanitizeForLocalStorage(state), local_evidence_files:[]};
+  const evs = collectEvidenceRows().filter(e=>e.local_blob_id);
+  for(const ev of evs){
+    const rec = await getLocalEvidenceRecord(ev.local_blob_id);
+    if(rec && rec.blob){
+      backup.local_evidence_files.push({evidence_id:ev.id, local_blob_id:ev.local_blob_id, return_code:ev.returnCode, order_number:ev.orderNumber, sku:ev.sku, product:ev.product, category:ev.category, name:rec.name || ev.name, type:rec.type || ev.type, size:rec.size || ev.size, data_url:await blobToDataUrl(rec.blob)});
+    }
+  }
+  download('backup-evidencias-returnflow.json', JSON.stringify(backup,null,2), 'application/json;charset=utf-8');
+}
 
 function renderReports(){
   const list = state.returns.filter(r => !r.isDeleted).filter(r => {
@@ -2840,6 +2984,10 @@ function renderSettings(){
           </table>
         </div>
         <div class="row-actions" style="margin-top:14px">
+          <button class="btn" onclick="optimizeLocalStorage(true)">Otimizar armazenamento local</button>
+          <button class="btn" onclick="showLocalStorageUsage()">Ver uso local</button>
+          <button class="btn" onclick="exportEvidenceCsv()">Relatório de evidências CSV</button>
+          <button class="btn" onclick="exportEvidenceBackupJson()">Backup com evidências locais</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
       </div>
@@ -2854,6 +3002,27 @@ function renderSettings(){
       </div>
     </div>
   `;
+}
+
+
+function optimizeLocalStorage(showAlert=true){
+  let removed = 0;
+  (state.returns || []).forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => {
+    if(ev.preview && String(ev.preview).startsWith('data:')){ ev.preview = ''; removed++; }
+    if(ev.localObjectUrl){ delete ev.localObjectUrl; removed++; }
+  })));
+  try{ localStorage.setItem(APP_KEY, JSON.stringify(sanitizeForLocalStorage({users:state.users,session:state.session,route:state.route,currentReturnId:state.currentReturnId,returns:state.returns,audit:state.audit,rules:state.rules,filters:state.filters,warehouses:state.warehouses,transfers:state.transfers}))); }catch(e){ console.warn(e); }
+  addAudit('Armazenamento local otimizado','sistema','localStorage',`${removed} preview(s) pesado(s) removido(s) do estado local`);
+  if(showAlert) alert(`Armazenamento otimizado. ${removed} preview(s) pesado(s) removido(s) do estado local. Os arquivos locais em IndexedDB foram preservados.`);
+  render();
+}
+
+function showLocalStorageUsage(){
+  const raw = localStorage.getItem(APP_KEY) || '';
+  const kb = Math.round((raw.length * 2) / 1024);
+  const evidenceCount = collectEvidenceRows().length;
+  const localCount = collectEvidenceRows().filter(e=>e.local_blob_id).length;
+  alert(`Uso aproximado do localStorage: ${kb} KB\nEvidências registradas: ${evidenceCount}\nArquivos locais em IndexedDB: ${localCount}\n\nObs.: imagens locais não ficam mais dentro do localStorage.`);
 }
 
 function updateRule(key,value){
@@ -2992,7 +3161,7 @@ async function fetchSupabaseEvidences(options={}){
   const sb = getSupabaseClient();
   if(!sb) return {merged:0,error:'SDK Supabase não carregado'};
   try{
-    let q = sb.from('evidence_files').select('*').order('created_at',{ascending:false}).limit(300);
+    let q = sb.from('evidence_files').select('*').order('created_at',{ascending:false}).limit(options.limit || (options.token ? 50 : 30));
     if(options.token) q = q.eq('upload_token', options.token);
     const {data,error} = await q;
     if(error) throw error;
@@ -3011,11 +3180,9 @@ async function fetchSupabaseEvidences(options={}){
 }
 
 function initSupabaseEvidenceSync(){
+  // Para reduzir consumo de egress do Supabase, a sincronização global automática foi desativada.
+  // Use o botão "Sincronizar 30 recentes" na Central de Evidências, ou o polling do QR Code enquanto o modal estiver aberto.
   if(globalEvidenceSyncTimer) return;
-  setTimeout(()=>fetchSupabaseEvidences({rerender:false}), 1500);
-  globalEvidenceSyncTimer = setInterval(()=>{
-    if(state.session) fetchSupabaseEvidences({rerender:false});
-  }, 12000);
 }
 
 async function openEvidenceQr(contextType, returnId='', itemId='', category='Produto recebido'){
