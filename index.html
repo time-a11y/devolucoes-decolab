@@ -454,6 +454,7 @@ const initialState = {
 };
 
 let state = loadState();
+purgeHeavyLocalStateReferences();
 ensureStateExtensions();
 
 
@@ -489,17 +490,34 @@ function loadState(){
   return structuredClone(initialState);
 }
 
-function sanitizeForLocalStorage(value){
-  const cloned = structuredClone(value);
-  (cloned.returns || []).forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => {
-    if(ev.preview && String(ev.preview).startsWith('data:')) ev.preview = '';
-    if(ev.localObjectUrl) delete ev.localObjectUrl;
-  })));
-  return cloned;
+function isHeavyStorageKey(key){
+  return ['preview','data_url','base64','blob','file','localObjectUrl','originalFile','compressedDataUrl','thumbnailDataUrl'].includes(key);
 }
 
-function save(){
-  const payload = sanitizeForLocalStorage({
+function sanitizeLocalStorageReplacer(key, value){
+  if(isHeavyStorageKey(key)) return '';
+  if(typeof value === 'string' && value.startsWith('data:')) return '';
+  if(value instanceof Blob || value instanceof File) return '';
+  return value;
+}
+
+function purgeHeavyLocalStateReferences(){
+  let removed = 0;
+  (state.returns || []).forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => {
+    ['preview','data_url','base64','blob','file','localObjectUrl','originalFile','compressedDataUrl','thumbnailDataUrl'].forEach(k => {
+      if(ev && ev[k]){ ev[k] = ''; removed++; }
+    });
+  })));
+  return removed;
+}
+
+function sanitizeForLocalStorage(value){
+  return JSON.parse(JSON.stringify(value, sanitizeLocalStorageReplacer));
+}
+
+function buildPersistPayload(){
+  if(state.audit && state.audit.length > 700) state.audit = state.audit.slice(0,700);
+  return {
     users: state.users,
     session: state.session,
     route: state.route,
@@ -510,13 +528,25 @@ function save(){
     filters: state.filters,
     warehouses: state.warehouses,
     transfers: state.transfers
-  });
+  };
+}
+
+function persistPayload(payload){
+  localStorage.setItem(APP_KEY, JSON.stringify(payload, sanitizeLocalStorageReplacer));
+}
+
+function save(){
+  const payload = buildPersistPayload();
   try{
-    localStorage.setItem(APP_KEY, JSON.stringify(payload));
+    persistPayload(payload);
   }catch(e){
-    if(String(e && e.message || e).includes('quota') || String(e && e.name || '').includes('Quota')){
-      optimizeLocalStorage(false);
-      localStorage.setItem(APP_KEY, JSON.stringify(sanitizeForLocalStorage(payload)));
+    if(String(e && e.message || e).toLowerCase().includes('quota') || String(e && e.name || '').toLowerCase().includes('quota')){
+      purgeHeavyLocalStateReferences();
+      try{
+        const oldRaw = localStorage.getItem(APP_KEY) || '';
+        if(oldRaw.length > 4500000) localStorage.removeItem(APP_KEY);
+      }catch(_e){}
+      persistPayload(buildPersistPayload());
     }else{
       throw e;
     }
@@ -2874,7 +2904,7 @@ function exportEvidenceCsv(){
 }
 
 async function exportEvidenceBackupJson(){
-  const backup = {exported_at:nowIso(), app_key:APP_KEY, state:sanitizeForLocalStorage(state), local_evidence_files:[]};
+  const backup = {exported_at:nowIso(), app_key:APP_KEY, state:sanitizeForLocalStorage(buildPersistPayload()), local_evidence_files:[]};
   const evs = collectEvidenceRows().filter(e=>e.local_blob_id);
   for(const ev of evs){
     const rec = await getLocalEvidenceRecord(ev.local_blob_id);
@@ -3006,16 +3036,13 @@ function renderSettings(){
 
 
 function optimizeLocalStorage(showAlert=true){
-  let removed = 0;
-  (state.returns || []).forEach(ret => (ret.items || []).forEach(item => (item.evidences || []).forEach(ev => {
-    if(ev.preview && String(ev.preview).startsWith('data:')){ ev.preview = ''; removed++; }
-    if(ev.localObjectUrl){ delete ev.localObjectUrl; removed++; }
-  })));
-  try{ localStorage.setItem(APP_KEY, JSON.stringify(sanitizeForLocalStorage({users:state.users,session:state.session,route:state.route,currentReturnId:state.currentReturnId,returns:state.returns,audit:state.audit,rules:state.rules,filters:state.filters,warehouses:state.warehouses,transfers:state.transfers}))); }catch(e){ console.warn(e); }
-  addAudit('Armazenamento local otimizado','sistema','localStorage',`${removed} preview(s) pesado(s) removido(s) do estado local`);
-  if(showAlert) alert(`Armazenamento otimizado. ${removed} preview(s) pesado(s) removido(s) do estado local. Os arquivos locais em IndexedDB foram preservados.`);
+  const removed = purgeHeavyLocalStateReferences();
+  try{ save(); }catch(e){ console.warn(e); }
+  addAudit('Armazenamento local otimizado','sistema','localStorage',`${removed} referência(s) pesada(s) removida(s) do estado local`);
+  if(showAlert) alert(`Armazenamento otimizado. ${removed} referência(s) pesada(s) removida(s) do estado local. Os arquivos locais em IndexedDB foram preservados.`);
   render();
 }
+
 
 function showLocalStorageUsage(){
   const raw = localStorage.getItem(APP_KEY) || '';
