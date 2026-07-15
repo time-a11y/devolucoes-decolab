@@ -173,7 +173,16 @@
     }
     .metric .number{font-size:32px;font-weight:900;letter-spacing:-.05em;margin:8px 0}
     .metric .label{color:var(--muted);font-size:13px;font-weight:700}
-    .iconbox{width:44px;height:44px;border-radius:15px;display:grid;place-items:center;background:#eff6ff;color:#1d4ed8;font-weight:900}
+    .iconbox{width:48px;height:48px;border-radius:18px;display:grid;place-items:center;background:linear-gradient(135deg,#eff6ff,#e0f2fe);color:#1d4ed8;font-weight:900;box-shadow:inset 0 0 0 1px rgba(37,99,235,.10),0 10px 24px rgba(37,99,235,.10);transition:transform .22s ease,box-shadow .22s ease}
+    .metric:hover .iconbox{transform:translateY(-3px) scale(1.04);box-shadow:inset 0 0 0 1px rgba(37,99,235,.14),0 14px 30px rgba(37,99,235,.16)}
+    .iconbox svg{width:24px;height:24px;stroke:currentColor;stroke-width:2.1;fill:none;stroke-linecap:round;stroke-linejoin:round}
+    .market-label{display:inline-flex;align-items:center;gap:8px;font-weight:850}
+    .market-logo{width:28px;height:28px;border-radius:10px;display:inline-grid;place-items:center;box-shadow:inset 0 0 0 1px rgba(15,23,42,.08);font-size:11px;font-weight:950;letter-spacing:-.04em}
+    .market-logo.ml{background:#fff159;color:#2d3277}
+    .market-logo.shopee{background:#ee4d2d;color:#fff}
+    .market-logo.amazon{background:#111827;color:#ff9900}
+    .report-kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-top:18px}
+    .report-kpi .item-card{min-height:112px}
     .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:15px}
     table{border-collapse:collapse;width:100%;background:#fff;min-width:860px}
     th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
@@ -285,6 +294,7 @@
       border:1px dashed #cbd5e1;background:#f8fafc;color:#64748b;border-radius:18px;padding:30px;text-align:center;
     }
     .print-only{display:none}
+    .report-kpi{grid-template-columns:repeat(4,minmax(0,1fr))}
     @media(max-width:1100px){
       .app-shell{grid-template-columns:1fr}
       .sidebar{position:relative;height:auto}
@@ -584,6 +594,7 @@ function uid(prefix='id'){
 }
 
 function nowIso(){ return new Date().toISOString(); }
+function nowDatetimeLocal(){ return toDatetimeLocal(new Date()); }
 
 function brDate(value){
   if(!value) return '-';
@@ -880,10 +891,10 @@ function renderDashboard(){
 
   return `
     <section class="grid cols-4">
-      ${metricCard('Total de devoluções', total, 'Processos registrados', '▤')}
-      ${metricCard('Em quarentena', quarantineItems, 'Itens retidos para análise', '⚠')}
-      ${metricCard('Descartes', discardItems, 'Itens sem retorno ao estoque', '⊘')}
-      ${metricCard('Perdas registradas', money(lost), 'Valor estimado descartado', 'R$')}
+      ${metricCard('Total de devoluções', total, 'Processos registrados', dashboardMetricIcon('returns'))}
+      ${metricCard('Em quarentena', quarantineItems, 'Itens retidos para análise', dashboardMetricIcon('quarantine'))}
+      ${metricCard('Descartes', discardItems, 'Itens sem retorno ao estoque', dashboardMetricIcon('discard'))}
+      ${metricCard('Perdas registradas', money(lost), 'Valor estimado descartado', dashboardMetricIcon('loss'))}
     </section>
 
     <section class="grid cols-2" style="margin-top:18px">
@@ -899,7 +910,7 @@ function renderDashboard(){
           <div><h2>Marketplaces</h2><p>Origem das devoluções recebidas.</p></div>
           <button class="btn small" onclick="exportReturnsCsv()">Exportar CSV</button>
         </div>
-        ${Object.keys(marketplaces).length ? renderBars(marketplaces) : empty('Sem dados de marketplace.')}
+        ${Object.keys(marketplaces).length ? renderMarketplaceBars(marketplaces) : empty('Sem dados de marketplace.')}
       </div>
     </section>
 
@@ -925,6 +936,7 @@ function metric(label, value, caption, icon='•'){
 }
 
 function metricCard(label, value, caption, icon){
+  const iconHtml = String(icon || '').trim().startsWith('<svg') ? icon : esc(icon || '•');
   return `
     <div class="card metric">
       <div>
@@ -932,9 +944,19 @@ function metricCard(label, value, caption, icon){
         <div class="number">${esc(value)}</div>
         <div class="hint">${esc(caption)}</div>
       </div>
-      <div class="iconbox">${esc(icon)}</div>
+      <div class="iconbox">${iconHtml}</div>
     </div>
   `;
+}
+
+function dashboardMetricIcon(type){
+  const icons = {
+    returns:'<svg viewBox="0 0 24 24"><path d="M8 7h10a3 3 0 0 1 3 3v7"></path><path d="M8 7l3-3"></path><path d="M8 7l3 3"></path><path d="M16 17H6a3 3 0 0 1-3-3V7"></path><path d="M16 17l-3-3"></path><path d="M16 17l-3 3"></path></svg>',
+    quarantine:'<svg viewBox="0 0 24 24"><path d="M12 3l9 16H3L12 3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>',
+    discard:'<svg viewBox="0 0 24 24"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>',
+    loss:'<svg viewBox="0 0 24 24"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path></svg>'
+  };
+  return icons[type] || icons.returns;
 }
 
 function countBy(list, fn){
@@ -946,10 +968,37 @@ function countBy(list, fn){
 }
 
 function renderBars(obj){
-  const max = Math.max(...Object.values(obj),1);
-  return `<div class="grid" style="margin-top:18px">${Object.entries(obj).map(([label,value]) => `
+  const entries = Object.entries(obj).sort((a,b)=>Number(b[1]||0)-Number(a[1]||0));
+  const max = Math.max(...entries.map(([,v])=>Number(v)||0),1);
+  return `<div class="grid" style="margin-top:18px">${entries.map(([label,value]) => `
     <div>
       <div class="split"><strong>${esc(label)}</strong><span class="hint">${value}</span></div>
+      <div class="kpi-bar" style="margin-top:8px"><span style="width:${Math.max(5,value/max*100)}%"></span></div>
+    </div>`).join('')}</div>`;
+}
+
+function marketplaceKind(label){
+  const v = String(label || '').toLowerCase();
+  if(v.includes('mercado') || v.includes('meli') || v.includes('ml')) return 'ml';
+  if(v.includes('shopee')) return 'shopee';
+  if(v.includes('amazon')) return 'amazon';
+  return 'other';
+}
+
+function marketplaceLogo(label){
+  const k = marketplaceKind(label);
+  if(k === 'ml') return '<span class="market-logo ml">ML</span>';
+  if(k === 'shopee') return '<span class="market-logo shopee">S</span>';
+  if(k === 'amazon') return '<span class="market-logo amazon">a</span>';
+  return '<span class="market-logo">MK</span>';
+}
+
+function renderMarketplaceBars(obj){
+  const entries = Object.entries(obj).sort((a,b)=>Number(b[1]||0)-Number(a[1]||0));
+  const max = Math.max(...entries.map(([,v])=>Number(v)||0),1);
+  return `<div class="grid" style="margin-top:18px">${entries.map(([label,value]) => `
+    <div>
+      <div class="split"><strong class="market-label">${marketplaceLogo(label)} ${esc(label)}</strong><span class="hint">${value}</span></div>
       <div class="kpi-bar" style="margin-top:8px"><span style="width:${Math.max(5,value/max*100)}%"></span></div>
     </div>`).join('')}</div>`;
 }
@@ -1064,7 +1113,7 @@ function renderNewReturn(){
             </div>
             <div class="field">
               <label>Data e hora do recebimento</label>
-              <input id="receivedAt" type="datetime-local" value="${new Date().toISOString().slice(0,16)}">
+              <input id="receivedAt" type="datetime-local" value="${nowDatetimeLocal()}">
             </div>
           </div>
           <div class="field">
@@ -3246,8 +3295,24 @@ function renderReports(){
     const mktOk = state.filters.reportMarketplace === 'Todos' || r.marketplace === state.filters.reportMarketplace;
     return statusOk && mktOk;
   });
-  const skus = countBy(list.flatMap(r=>r.items || []), i => i.sku || 'Sem SKU');
+  const items = list.flatMap(r => (r.items || []).map(i => ({...i, returnRecord:r})));
+  const skuMap = items.reduce((acc,i) => {
+    const k = i.sku || 'Sem SKU';
+    acc[k] = (acc[k] || 0) + itemQty(i);
+    return acc;
+  }, {});
   const reasons = countBy(list, r => r.returnReason || 'Não informado');
+  const marketplaces = countBy(list, r => r.marketplace || 'Não informado');
+  const totalItems = items.reduce((s,i)=>s + itemQty(i),0);
+  const totalValue = items.reduce((s,i)=>s + Number(i.totalValue || (Number(i.unitValue||0) * itemQty(i)) || 0),0);
+  const divergentReturns = list.filter(r => (r.alerts || []).some(a => ['Crítica','Média'].includes(a.level))).length;
+  const divergenceRate = list.length ? Math.round(divergentReturns / list.length * 100) : 0;
+  const topSku = Object.entries(skuMap).sort((a,b)=>Number(b[1]||0)-Number(a[1]||0))[0];
+  const topMarketplace = Object.entries(marketplaces).sort((a,b)=>Number(b[1]||0)-Number(a[1]||0))[0];
+  const restockQty = items.filter(i => ['Reabastecimento','Disponível para venda'].includes(i.destination)).reduce((s,i)=>s+itemQty(i),0);
+  const quarantineQty = items.filter(i => i.destination === 'Quarentena').reduce((s,i)=>s+itemQty(i),0);
+  const discardQty = items.filter(i => ['Descarte','Perda operacional'].includes(i.destination)).reduce((s,i)=>s+itemQty(i),0);
+  const avgItemsPerReturn = list.length ? totalItems / list.length : 0;
 
   return `
     <div class="card">
@@ -3261,20 +3326,31 @@ function renderReports(){
       <div class="form-grid two" style="margin-top:16px">
         <div class="field">
           <label>Status</label>
-          <select onchange="state.filters.reportStatus=this.value; render()">
+          <select onchange="state.filters.reportStatus=this.value; save(); render()">
             ${['Todos',...Object.keys(STATUS_COLOR)].map(s=>`<option ${state.filters.reportStatus===s?'selected':''}>${esc(s)}</option>`).join('')}
           </select>
         </div>
         <div class="field">
           <label>Marketplace</label>
-          <select onchange="state.filters.reportMarketplace=this.value; render()">
+          <select onchange="state.filters.reportMarketplace=this.value; save(); render()">
             ${['Todos',...state.rules.marketplaces].map(s=>`<option ${state.filters.reportMarketplace===s?'selected':''}>${esc(s)}</option>`).join('')}
           </select>
         </div>
       </div>
     </div>
+    <section class="report-kpi">
+      <div class="item-card"><strong>Itens devolvidos</strong><p><span class="number" style="font-size:26px">${num(totalItems)}</span><br><span class="hint">Quantidade física filtrada</span></p></div>
+      <div class="item-card"><strong>Valor devolvido</strong><p><span class="number" style="font-size:26px">${money(totalValue)}</span><br><span class="hint">Valor estimado dos itens</span></p></div>
+      <div class="item-card"><strong>Divergências</strong><p><span class="number" style="font-size:26px">${divergenceRate}%</span><br><span class="hint">${divergentReturns} processo(s) com alerta</span></p></div>
+      <div class="item-card"><strong>Média por devolução</strong><p><span class="number" style="font-size:26px">${num(avgItemsPerReturn)}</span><br><span class="hint">Itens por processo</span></p></div>
+    </section>
+    <section class="grid cols-3" style="margin-top:18px">
+      <div class="card"><h2>Destino operacional</h2>${renderBars({'Reabastecimento / disponível':restockQty,'Quarentena':quarantineQty,'Descarte / perda':discardQty})}</div>
+      <div class="card"><h2>SKU mais devolvido</h2>${topSku ? `<p><strong>${esc(topSku[0])}</strong></p><p class="number" style="font-size:28px">${num(topSku[1])}</p><p class="hint">unidade(s) no período filtrado</p>` : empty('Sem SKU.')}</div>
+      <div class="card"><h2>Marketplace principal</h2>${topMarketplace ? `<p class="market-label">${marketplaceLogo(topMarketplace[0])} ${esc(topMarketplace[0])}</p><p class="number" style="font-size:28px">${num(topMarketplace[1])}</p><p class="hint">processo(s) no período filtrado</p>` : empty('Sem marketplace.')}</div>
+    </section>
     <section class="grid cols-2" style="margin-top:18px">
-      <div class="card"><h2>SKUs com devolução</h2>${Object.keys(skus).length ? renderBars(skus) : empty('Sem SKUs.')}</div>
+      <div class="card"><h2>SKUs com devolução</h2><p class="hint">Ordenado automaticamente do maior para o menor volume devolvido.</p>${Object.keys(skuMap).length ? renderBars(skuMap) : empty('Sem SKUs.')}</div>
       <div class="card"><h2>Motivos de devolução</h2>${Object.keys(reasons).length ? renderBars(reasons) : empty('Sem motivos.')}</div>
     </section>
     <div class="card" style="margin-top:18px">
