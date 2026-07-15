@@ -447,10 +447,12 @@ const initialState = {
     stockSearch: '',
     stockView: 'sku',
     transferSearch: '',
-    transferTab: 'transfers'
+    transferTab: 'transfers',
+    salesOrderSearch: ''
   },
   warehouses: [],
-  transfers: []
+  transfers: [],
+  salesOrders: []
 };
 
 let state = loadState();
@@ -464,10 +466,12 @@ function ensureStateExtensions(){
   if(!state.filters.stockView) state.filters.stockView = 'sku';
   if(!state.filters.transferSearch) state.filters.transferSearch = '';
   if(!state.filters.transferTab) state.filters.transferTab = 'transfers';
+  if(!state.filters.salesOrderSearch) state.filters.salesOrderSearch = '';
   if(!state.filters.evidenceSearch) state.filters.evidenceSearch = '';
   if(!state.filters.evidenceLimit) state.filters.evidenceLimit = 30;
   state.warehouses = state.warehouses || defaultWarehouses();
   state.transfers = (state.transfers || []).map(t => ({...t, operational_status: t.operational_status || 'packing', mkt_shipment_id: t.mkt_shipment_id || ''}));
+  state.salesOrders = (state.salesOrders || []).map(o => ({...o, status:o.status || 'Rascunho', operational_status:o.operational_status || 'Separação', items:o.items || [], audit_history:o.audit_history || []}));
   state.returns = (state.returns || []).map(r => ({...r, isDeleted: !!r.isDeleted, items:(r.items||[]).map(i => ({...i, evidences:i.evidences||[]}))}));
 }
 
@@ -527,7 +531,8 @@ function buildPersistPayload(){
     rules: state.rules,
     filters: state.filters,
     warehouses: state.warehouses,
-    transfers: state.transfers
+    transfers: state.transfers,
+    salesOrders: state.salesOrders
   };
 }
 
@@ -720,6 +725,7 @@ function renderSidebar(){
     ['devolucoes','Devoluções','▤','reports'],
     ['estoque','Estoque Devolvido','▥','stock'],
     ['transferencias','Transferências','⇄','stock'],
+    ['pedidos','Pedidos de Venda','🧾','stock'],
     ['evidencias','Central de Evidências','▧','reports'],
     ['relatorios','Relatórios','◷','reports'],
     ['auditoria','Auditoria','⎋','audit'],
@@ -752,6 +758,7 @@ function renderTopbar(){
     devolucoes:'Devoluções',
     estoque:'Estoque Devolvido',
     transferencias:'Transferências',
+    pedidos:'Pedidos de Venda',
     evidencias:'Central de Evidências',
     relatorios:'Relatórios',
     auditoria:'Trilha de auditoria',
@@ -763,6 +770,7 @@ function renderTopbar(){
     devolucoes:'Consulte, abra e finalize processos de devolução.',
     estoque:'Controle os saldos dos produtos devolvidos por SKU, item, localização e destino.',
     transferencias:'Crie transferências, baixe saldos, registre destinos e acompanhe recebimentos.',
+    pedidos:'Crie pedidos de venda por XML, separe SKUs vendáveis e baixe o estoque devolvido por venda.',
     evidencias:'Visualize e baixe imagens, documentos e anexos enviados pelo celular ou pelo computador.',
     relatorios:'Exporte dados para auditoria, financeiro e marketplaces.',
     auditoria:'Histórico imutável de ações relevantes.',
@@ -788,6 +796,7 @@ function renderRoute(){
   if(state.route === 'devolucoes') return renderReturns();
   if(state.route === 'estoque') return renderReturnedStock();
   if(state.route === 'transferencias') return renderTransfers();
+  if(state.route === 'pedidos') return renderSalesOrders();
   if(state.route === 'evidencias') return renderEvidenceCenter();
   if(state.route === 'relatorios') return renderReports();
   if(state.route === 'auditoria') return renderAudit();
@@ -2277,11 +2286,15 @@ function getTransferItems(){ return (state.transfers || []).flatMap(t => (t.item
 
 function transferTotalsFor(retId,itemId){
   const rows = getTransferItems().filter(i => i.returnId === retId && i.returnItemId === itemId && !['Cancelada','Recusada'].includes(i.transfer.status));
-  const reserved = rows.filter(i => ['Rascunho','Pendente de envio'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
-  const sent = rows.filter(i => ['Enviada','Em trânsito','Recebida','Finalizada','Parcialmente recebida'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
-  const inTransit = rows.filter(i => ['Enviada','Em trânsito'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
-  const discarded = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('descarte')).reduce((s,i)=>s+Number(i.quantity||0),0);
-  const writtenOff = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('perda')).reduce((s,i)=>s+Number(i.quantity||0),0);
+  let reserved = rows.filter(i => ['Rascunho','Pendente de envio'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  let sent = rows.filter(i => ['Enviada','Em trânsito','Recebida','Finalizada','Parcialmente recebida'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  let inTransit = rows.filter(i => ['Enviada','Em trânsito'].includes(i.transfer.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  let discarded = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('descarte')).reduce((s,i)=>s+Number(i.quantity||0),0);
+  let writtenOff = rows.filter(i => String(i.transfer.type||'').toLowerCase().includes('perda')).reduce((s,i)=>s+Number(i.quantity||0),0);
+  const saleRows = getSalesOrderItems().filter(i => i.returnId === retId && i.returnItemId === itemId && !['Cancelado'].includes(i.order.status));
+  reserved += saleRows.filter(i => ['Rascunho','Separação','Conferência','Packing','Aguardando coleta'].includes(i.order.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  sent += saleRows.filter(i => ['Enviado','Entregue'].includes(i.order.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
+  inTransit += saleRows.filter(i => ['Enviado'].includes(i.order.status)).reduce((s,i)=>s+Number(i.quantity||0),0);
   return {reserved, sent, inTransit, discarded, writtenOff};
 }
 
@@ -2868,6 +2881,281 @@ function collectEvidenceRows(){
   const all=[];
   state.returns.forEach(r=>(r.items||[]).forEach(i=>(i.evidences||[]).forEach(e=>all.push({...e, returnCode:r.code, orderNumber:r.orderNumber, marketplace:r.marketplace, customerName:r.customerName, sku:i.sku, product:i.description, destination:i.destination, returnId:r.id, itemId:i.id}))));
   return all.sort((a,b)=> new Date(b.uploadedAt || b.created_at || 0) - new Date(a.uploadedAt || a.created_at || 0));
+}
+
+
+// =============================
+// Pedidos de venda por XML
+// =============================
+let salesOrderXmlInvoiceCache = null;
+
+function getSalesOrderItems(){
+  return (state.salesOrders || []).flatMap(o => (o.items || []).map(i => ({...i, order:o})));
+}
+
+function salesOrderStatusOptions(){
+  return ['Rascunho','Separação','Conferência','Packing','Aguardando coleta','Enviado','Entregue','Cancelado'];
+}
+
+function salesOrderOperationalOptions(){
+  return ['Separação','Conferência','Packing','Aguardando coleta','Enviado'];
+}
+
+function isSellableStockRow(row){
+  const dest = String(row.finalDestination || row.status || '').trim();
+  return Number(row.availableQuantity || 0) > 0 && ['Reabastecimento','Outlet','Disponível para venda'].includes(dest);
+}
+
+function parseSalesOrderXml(xmlText){
+  const inv = parseNFeXml(xmlText);
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, 'application/xml');
+  const dest = getTag(doc, 'dest');
+  const end = getTag(dest, 'enderDest');
+  inv.customer = {
+    name: tagText(dest,'xNome') || inv.recipient?.name || '',
+    document: tagText(dest,'CNPJ') || tagText(dest,'CPF') || inv.recipient?.document || '',
+    phone: tagText(end,'fone') || '',
+    email: tagText(dest,'email') || '',
+    address: tagText(end,'xLgr') || '',
+    number: tagText(end,'nro') || '',
+    complement: tagText(end,'xCpl') || '',
+    district: tagText(end,'xBairro') || '',
+    city: tagText(end,'xMun') || '',
+    state: tagText(end,'UF') || '',
+    zip_code: tagText(end,'CEP') || '',
+    country: tagText(end,'xPais') || 'Brasil'
+  };
+  inv.customer.full_address = [inv.customer.address, inv.customer.number, inv.customer.complement, inv.customer.district, inv.customer.city, inv.customer.state, inv.customer.zip_code].filter(Boolean).join(', ');
+  return inv;
+}
+
+function renderSalesOrders(){
+  ensureStateExtensions();
+  const q=(state.filters.salesOrderSearch||'').toLowerCase().trim();
+  let list = state.salesOrders || [];
+  if(q){
+    list = list.filter(o => [o.code,o.order_number,o.channel,o.customer_name,o.customer_doc,o.invoice?.number,o.invoice?.accessKey,o.status,o.operational_status,...(o.items||[]).map(i=>i.sku+' '+i.productName)].join(' ').toLowerCase().includes(q));
+  }
+  const totalQty = list.reduce((s,o)=>s+Number(o.total_quantity||0),0);
+  const totalValue = list.reduce((s,o)=>s+Number(o.total_value||0),0);
+  return `<section class="grid cols-4">
+    ${metric('Pedidos de venda', list.length, 'Criados por XML')}
+    ${metric('Unidades reservadas/vendidas', num(totalQty), 'Baixa vinculada ao estoque devolvido')}
+    ${metric('Valor dos pedidos', money(totalValue), 'Valor lido do XML')}
+    ${metric('Aguardando coleta', list.filter(o=>o.status==='Aguardando coleta').length, 'Pedidos prontos para envio')}
+  </section>
+  <div class="card" style="margin-top:18px">
+    <div class="split">
+      <div><h2>Pedidos de Venda</h2><p>Crie pedidos a partir do XML da venda. Cliente, endereço, NF-e e itens são preenchidos automaticamente.</p></div>
+      <div class="row-actions"><button class="btn primary" onclick="openSalesOrderXmlModal()">Novo pedido por XML</button><button class="btn" onclick="exportSalesOrdersCsv()">Exportar CSV</button></div>
+    </div>
+    <div class="field" style="margin-top:14px"><input placeholder="Buscar pedido, cliente, CPF/CNPJ, SKU, NF-e ou status..." value="${esc(state.filters.salesOrderSearch||'')}" oninput="state.filters.salesOrderSearch=this.value; save(); render()"></div>
+    ${list.length ? `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Pedido</th><th>Cliente / Endereço</th><th>NF-e</th><th>Itens</th><th>Valor</th><th>Status</th><th>Etapa</th><th>Ações</th></tr></thead><tbody>${list.map(o=>`<tr><td><strong>${esc(o.code)}</strong><br><span class="hint">Pedido: ${esc(o.order_number||'-')}<br>Canal: ${esc(o.channel||'-')}</span></td><td>${esc(o.customer_name||'-')}<br><span class="hint">${esc(o.customer_doc||'-')}<br>${esc(o.customer_address||'-')}</span></td><td>${esc(o.invoice?.number||'-')}<br><span class="hint">${esc(o.invoice?.accessKey||'-')}</span></td><td>${num(o.total_quantity)} un.<br><span class="hint">${(o.items||[]).length} SKU(s)</span></td><td>${money(o.total_value)}</td><td>${statusBadge(o.status)}</td><td>${salesOrderOperationalControl(o)}</td><td><div class="row-actions"><button class="btn small" onclick="openSalesOrderDetail('${o.id}')">Detalhe</button><button class="btn small" onclick="printSalesOrderPickingList('${o.id}')">Romaneio PDF</button><button class="btn small" onclick="confirmSalesOrderShipment('${o.id}')" ${['Enviado','Entregue','Cancelado'].includes(o.status)?'disabled':''}>Confirmar envio</button><button class="btn danger small" onclick="cancelSalesOrder('${o.id}')" ${['Enviado','Entregue','Cancelado'].includes(o.status)?'disabled':''}>Cancelar</button></div></td></tr>`).join('')}</tbody></table></div>` : empty('Nenhum pedido de venda criado ainda.')}
+  </div>`;
+}
+
+function salesOrderOperationalControl(o){
+  return `<select class="oper-tag-select" onchange="updateSalesOrderOperationalStatus('${esc(o.id)}',this.value)">${salesOrderOperationalOptions().map(s=>`<option value="${esc(s)}" ${o.operational_status===s?'selected':''}>${esc(s)}</option>`).join('')}</select>`;
+}
+
+function updateSalesOrderOperationalStatus(id,value){
+  const o=(state.salesOrders||[]).find(x=>x.id===id);
+  if(!o) return;
+  const old=o.operational_status || '';
+  o.operational_status=value;
+  if(['Separação','Conferência','Packing','Aguardando coleta','Enviado'].includes(value)) o.status = value === 'Enviado' ? 'Enviado' : value;
+  (o.audit_history=o.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Etapa do pedido alterada',detail:`${old} → ${value}`});
+  addAudit('Etapa do pedido de venda alterada','pedido_venda',o.id,`${o.code}: ${old} → ${value}`);
+  render();
+}
+
+function openSalesOrderXmlModal(){
+  salesOrderXmlInvoiceCache = null;
+  const html = `<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1280px"><div class="modal-header"><div><h2>Novo pedido de venda por XML</h2><p>Envie o XML da venda para preencher cliente, endereço, NF-e e itens automaticamente.</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><form id="salesOrderForm" onsubmit="saveSalesOrderFromXml(event)">
+    <div class="form-grid two">
+      <div class="field"><label>Canal de venda</label><select name="channel"><option>Mercado Livre</option><option>Shopee</option><option>Amazon</option><option>Site</option><option>Venda manual</option><option>Outlet</option><option>Outro</option></select></div>
+      <div class="field"><label>Número do pedido</label><input name="order_number" id="salesOrderNumber" placeholder="Preenchimento opcional"></div>
+      <div class="field"><label>Transportadora</label><input name="carrier" placeholder="Ex.: Correios, Jadlog"></div>
+      <div class="field"><label>Rastreio</label><input name="tracking_code"></div>
+    </div>
+    <div class="dropzone" style="margin:12px 0 18px"><strong>Upload do XML do pedido/venda</strong><span class="hint">O app preencherá cliente, endereço, NF-e, SKUs e quantidades. O estoque será alocado somente de itens vendáveis.</span><input style="margin-top:14px" type="file" accept=".xml,text/xml,application/xml" onchange="handleSalesOrderXmlUpload(this)"></div>
+    <div id="salesOrderXmlSummary"></div>
+    <div id="salesOrderCustomerFields"></div>
+    <div id="salesOrderXmlMatches">${empty('Envie o XML para listar os SKUs disponíveis para venda.')}</div>
+    <div class="row-actions" style="margin-top:16px"><button class="btn" type="button" onclick="closeModal()">Cancelar</button><button class="btn primary" type="submit">Criar pedido de venda</button></div>
+  </form></div></div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
+function handleSalesOrderXmlUpload(input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  if(!file.name.toLowerCase().endsWith('.xml')){ alert('Envie um arquivo XML válido.'); return; }
+  const reader = new FileReader();
+  reader.onload = function(){
+    try{
+      salesOrderXmlInvoiceCache = parseSalesOrderXml(String(reader.result || ''));
+      salesOrderXmlInvoiceCache.fileName = file.name;
+      refreshSalesOrderXmlMatches();
+      addAudit('XML de pedido de venda carregado','arquivo',file.name,`${file.size} bytes`);
+    }catch(e){
+      salesOrderXmlInvoiceCache = null;
+      alert(e.message || 'Não foi possível ler o XML.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function groupSalesOrderXmlItems(invoice){
+  const map = {};
+  (invoice?.items || []).forEach(item => {
+    const sku = String(item.sku || '').trim();
+    const ean = String(item.ean || '').trim();
+    const key = sku || ean || item.description || uid('sale-xml');
+    if(!map[key]) map[key] = {key, sku, ean, description:item.description || '', quantity:0, unitValue:Number(item.unitValue || 0), totalValue:0, xmlItems:[]};
+    map[key].quantity += Number(item.quantity || 0);
+    map[key].totalValue += Number(item.totalValue || 0);
+    if(Number(item.unitValue || 0)) map[key].unitValue = Number(item.unitValue || 0);
+    map[key].xmlItems.push(item);
+  });
+  return Object.values(map);
+}
+
+function refreshSalesOrderXmlMatches(){
+  const summary = document.getElementById('salesOrderXmlSummary');
+  const customerBox = document.getElementById('salesOrderCustomerFields');
+  const target = document.getElementById('salesOrderXmlMatches');
+  if(!target) return;
+  if(!salesOrderXmlInvoiceCache){
+    target.innerHTML = empty('Envie o XML para listar os SKUs disponíveis para venda.');
+    if(summary) summary.innerHTML = '';
+    if(customerBox) customerBox.innerHTML = '';
+    return;
+  }
+  const inv = salesOrderXmlInvoiceCache;
+  const xmlGroups = groupSalesOrderXmlItems(inv);
+  const sellableRows = getReturnedStockRows().filter(isSellableStockRow);
+  if(summary){
+    summary.innerHTML = `<div class="alert baixa" style="margin-bottom:14px"><strong>XML</strong><div><strong>${esc(inv.fileName || 'XML carregado')}</strong><br><span class="hint">NF ${esc(inv.number || '-')} · Série ${esc(inv.series || '-')} · Chave ${esc(inv.accessKey || '-')} · Valor ${money(inv.totalValue || 0)}</span></div></div>`;
+  }
+  if(customerBox){
+    const c = inv.customer || {};
+    customerBox.innerHTML = `<h3>Cliente e endereço do XML</h3><div class="form-grid two">
+      <div class="field"><label>Cliente</label><input name="customer_name" value="${esc(c.name||'')}"></div>
+      <div class="field"><label>CPF/CNPJ</label><input name="customer_doc" value="${esc(c.document||'')}"></div>
+      <div class="field"><label>Telefone</label><input name="customer_phone" value="${esc(c.phone||'')}"></div>
+      <div class="field"><label>E-mail</label><input name="customer_email" value="${esc(c.email||'')}"></div>
+      <div class="field" style="grid-column:1/-1"><label>Endereço completo</label><input name="customer_address" value="${esc(c.full_address||'')}"></div>
+      <div class="field"><label>Cidade</label><input name="customer_city" value="${esc(c.city||'')}"></div>
+      <div class="field"><label>UF</label><input name="customer_state" value="${esc(c.state||'')}"></div>
+    </div>`;
+  }
+  const rowsHtml = xmlGroups.map((g,idx)=>{
+    const matches = sellableRows.filter(r => {
+      const skuOk = g.sku && String(r.sku || '').trim().toLowerCase() === g.sku.toLowerCase();
+      const eanOk = g.ean && cleanDigits(r.ean) && cleanDigits(r.ean) === cleanDigits(g.ean);
+      return skuOk || eanOk;
+    }).sort((a,b)=> new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+    const available = matches.reduce((s,r)=>s+Number(r.availableQuantity||0),0);
+    const suggested = Math.min(Number(g.quantity||0), available);
+    const missing = Math.max(0, Number(g.quantity||0) - available);
+    const canUse = suggested > 0;
+    return `<tr><td><input type="checkbox" name="sale_xml_item_key" value="${esc(g.key)}" ${canUse?'checked':''} ${canUse?'':'disabled'}></td><td><strong>${esc(g.sku || '-')}</strong><br><span class="hint">${esc(g.description || '-')}<br>EAN ${esc(g.ean || '-')}</span></td><td>${num(g.quantity)}</td><td>${num(available)}<br><span class="hint">${matches.length} registro(s) vendável(is)</span></td><td><input type="number" name="sale_xml_qty_${idx}" min="0" max="${esc(available)}" step="0.0001" value="${esc(suggested)}" ${canUse?'':'disabled'}></td><td>${missing>0?`<span class="badge red">Falta ${num(missing)}</span>`:`<span class="badge green">OK</span>`}</td><td>${matches.slice(0,4).map(r=>`${destBadge(r.finalDestination)} <span class="hint">${esc(r.code)} · ${num(r.availableQuantity)}</span>`).join('<br>') || '<span class="hint">Sem estoque vendável compatível</span>'}</td></tr>`;
+  }).join('');
+  target.innerHTML = `<h3 style="margin-top:18px">Itens do XML x estoque vendável</h3><p class="hint">Somente itens em Reabastecimento, Outlet ou Disponível para venda são alocados. O saldo fica reservado até envio/cancelamento.</p><div class="table-wrap" style="max-height:430px"><table style="min-width:1120px"><thead><tr><th>Selecionar</th><th>SKU / Produto do XML</th><th>Qtd XML</th><th>Saldo vendável</th><th>Qtd do pedido</th><th>Conferência</th><th>Origem do estoque</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
+}
+
+function saveSalesOrderFromXml(ev){
+  ev.preventDefault();
+  if(!salesOrderXmlInvoiceCache){ alert('Envie o XML antes de criar o pedido de venda.'); return; }
+  const f = new FormData(ev.target);
+  const selected = f.getAll('sale_xml_item_key');
+  if(!selected.length){ alert('Nenhum SKU do XML foi selecionado ou possui saldo vendável.'); return; }
+  const inv = salesOrderXmlInvoiceCache;
+  const groups = groupSalesOrderXmlItems(inv);
+  const sellableRows = getReturnedStockRows().filter(isSellableStockRow);
+  const items=[];
+  let totalQty=0,totalValue=0;
+  groups.forEach((g,idx)=>{
+    if(!selected.includes(g.key)) return;
+    const requested = Number(f.get('sale_xml_qty_' + idx) || 0);
+    if(requested <= 0) return;
+    let remaining = requested;
+    const matches = sellableRows.filter(r => {
+      const skuOk = g.sku && String(r.sku || '').trim().toLowerCase() === g.sku.toLowerCase();
+      const eanOk = g.ean && cleanDigits(r.ean) && cleanDigits(r.ean) === cleanDigits(g.ean);
+      return skuOk || eanOk;
+    }).sort((a,b)=> new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+    const available = matches.reduce((s,r)=>s+Number(r.availableQuantity||0),0);
+    if(requested > available){ alert('Quantidade maior que saldo vendável para o SKU ' + (g.sku || g.description)); return; }
+    for(const r of matches){
+      if(remaining <= 0) break;
+      const q = Math.min(Number(r.availableQuantity || 0), remaining);
+      if(q <= 0) continue;
+      items.push({id:uid('soi'), returnedStockId:r.id, returnId:r.returnId, returnItemId:r.itemId, sku:r.sku, ean:r.ean, productName:r.product, quantity:q, unitValue:g.unitValue || r.unitValue, saleValue:q*(g.unitValue || r.unitValue || 0), originLocation:r.location, balanceBefore:r.currentBalance, balanceAfter:Math.max(0,r.currentBalance-q), status:'Reservado', notes:`Pedido criado por XML NF ${inv.number || '-'} · Qtd XML ${num(g.quantity)}`});
+      totalQty += q;
+      totalValue += q*(g.unitValue || r.unitValue || 0);
+      remaining -= q;
+    }
+  });
+  if(!items.length){ alert('Nenhum item válido foi alocado. Verifique o XML e os saldos vendáveis.'); return; }
+  const order = {id:uid('so'), code:'PDV-'+new Date().toISOString().slice(2,10).replace(/-/g,'')+'-'+String((state.salesOrders||[]).length+1).padStart(4,'0'), order_number:String(f.get('order_number') || inv.number || '').trim(), channel:String(f.get('channel') || 'Venda manual'), status:'Separação', operational_status:'Separação', created_by:currentUserName(), created_at:nowIso(), updated_at:nowIso(), customer_name:String(f.get('customer_name') || inv.customer?.name || ''), customer_doc:cleanDigits(f.get('customer_doc') || inv.customer?.document || ''), customer_phone:String(f.get('customer_phone') || inv.customer?.phone || ''), customer_email:String(f.get('customer_email') || inv.customer?.email || ''), customer_address:String(f.get('customer_address') || inv.customer?.full_address || ''), customer_city:String(f.get('customer_city') || inv.customer?.city || ''), customer_state:String(f.get('customer_state') || inv.customer?.state || ''), carrier:String(f.get('carrier') || ''), tracking_code:String(f.get('tracking_code') || ''), invoice:{number:inv.number||'', series:inv.series||'', accessKey:inv.accessKey||'', issueDate:inv.issueDate||'', fileName:inv.fileName||'', totalValue:inv.totalValue||0}, total_quantity:totalQty, total_value:totalValue, items, audit_history:[{at:nowIso(),user:currentUserName(),action:'Pedido de venda criado por XML',detail:`NF ${inv.number || '-'} · ${items.length} alocação(ões)`}]};
+  state.salesOrders.unshift(order);
+  addAudit('Pedido de venda criado por XML','pedido_venda',order.id,`${order.code} · NF ${order.invoice.number || '-'} · ${items.length} item(ns)`);
+  salesOrderXmlInvoiceCache = null;
+  closeModal();
+  render();
+}
+
+function openSalesOrderDetail(id){
+  const o=(state.salesOrders||[]).find(x=>x.id===id);
+  if(!o) return;
+  const html=`<div class="modal-backdrop" id="modal"><div class="modal" style="max-width:1100px"><div class="modal-header"><div><h2>${esc(o.code)}</h2><p>${esc(o.channel)} · Pedido ${esc(o.order_number||'-')}</p></div><button class="btn ghost" onclick="closeModal()">Fechar</button></div><div class="grid cols-2"><div class="item-card"><strong>Cliente</strong><p>${esc(o.customer_name||'-')}<br><span class="hint">${esc(o.customer_doc||'-')}<br>${esc(o.customer_address||'-')}</span></p></div><div class="item-card"><strong>Status</strong><p>${statusBadge(o.status)}</p><p><strong>Etapa:</strong><br>${salesOrderOperationalControl(o)}</p></div></div><h3 style="margin-top:18px">Itens do pedido</h3><div class="table-wrap"><table><thead><tr><th>SKU</th><th>Produto</th><th>Qtd</th><th>Origem</th><th>Saldo antes</th><th>Saldo depois</th><th>Valor</th></tr></thead><tbody>${(o.items||[]).map(i=>`<tr><td>${esc(i.sku)}<br><span class="hint">${esc(i.ean||'-')}</span></td><td>${esc(i.productName)}</td><td>${num(i.quantity)}</td><td>${esc(i.originLocation||'-')}</td><td>${num(i.balanceBefore)}</td><td>${num(i.balanceAfter)}</td><td>${money(i.saleValue)}</td></tr>`).join('')}</tbody></table></div><h3 style="margin-top:18px">Histórico</h3>${renderTimeline(o.audit_history||[])}<div class="row-actions" style="margin-top:16px"><button class="btn small" onclick="printSalesOrderPickingList('${o.id}')">Romaneio PDF</button><button class="btn small" onclick="confirmSalesOrderShipment('${o.id}')" ${['Enviado','Entregue','Cancelado'].includes(o.status)?'disabled':''}>Confirmar envio</button><button class="btn danger small" onclick="cancelSalesOrder('${o.id}')" ${['Enviado','Entregue','Cancelado'].includes(o.status)?'disabled':''}>Cancelar</button></div></div></div>`;
+  document.body.insertAdjacentHTML('beforeend',html);
+}
+
+function confirmSalesOrderShipment(id){
+  const o=(state.salesOrders||[]).find(x=>x.id===id);
+  if(!o) return;
+  if(!confirm(`Confirmar envio do pedido ${o.code}? O estoque reservado será baixado como venda enviada.`)) return;
+  o.status='Enviado';
+  o.operational_status='Enviado';
+  o.shipped_at=nowIso();
+  o.updated_at=nowIso();
+  (o.audit_history=o.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Pedido enviado',detail:'Baixa por venda registrada no estoque devolvido'});
+  addAudit('Pedido de venda enviado','pedido_venda',o.id,o.code);
+  render();
+}
+
+function cancelSalesOrder(id){
+  const o=(state.salesOrders||[]).find(x=>x.id===id);
+  if(!o) return;
+  const reason = prompt(`Motivo do cancelamento do pedido ${o.code}:`);
+  if(!reason) return;
+  o.status='Cancelado';
+  o.operational_status='Cancelado';
+  o.canceled_at=nowIso();
+  (o.audit_history=o.audit_history||[]).unshift({at:nowIso(),user:currentUserName(),action:'Pedido cancelado',detail:reason});
+  addAudit('Pedido de venda cancelado','pedido_venda',o.id,reason);
+  render();
+}
+
+function printSalesOrderPickingList(id){
+  const o=(state.salesOrders||[]).find(x=>x.id===id);
+  if(!o) return;
+  const rows = (o.items||[]).map((i,idx)=>`<tr><td>${idx+1}</td><td><strong>${esc(i.sku)}</strong><br><small>${esc(i.ean||'-')}</small></td><td>${esc(i.productName||'-')}</td><td style="text-align:center;font-weight:700">${num(i.quantity)}</td><td>${esc(i.originLocation||'-')}</td><td style="height:34px"></td><td></td></tr>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Romaneio ${esc(o.code)}</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111827}h1{font-size:22px;margin:0 0 6px}.muted{color:#667085;font-size:12px}.box{border:1px solid #d0d5dd;border-radius:10px;padding:12px;margin:12px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #d0d5dd;padding:8px;font-size:12px;text-align:left}th{background:#f2f4f7}.sign{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:36px}.line{border-top:1px solid #111827;padding-top:8px;text-align:center;font-size:12px}@media print{button{display:none}}</style></head><body><button onclick="window.print()" style="float:right;padding:10px 14px">Imprimir / salvar PDF</button><h1>Romaneio de pedido de venda</h1><div class="muted">Gerado em ${brDate(nowIso())}</div><div class="box grid"><div><strong>Pedido:</strong> ${esc(o.code)}</div><div><strong>Pedido externo:</strong> ${esc(o.order_number||'-')}</div><div><strong>Canal:</strong> ${esc(o.channel||'-')}</div><div><strong>Status:</strong> ${esc(o.status||'-')}</div><div><strong>Cliente:</strong> ${esc(o.customer_name||'-')}</div><div><strong>Documento:</strong> ${esc(o.customer_doc||'-')}</div><div style="grid-column:1/-1"><strong>Endereço:</strong> ${esc(o.customer_address||'-')}</div><div><strong>Transportadora:</strong> ${esc(o.carrier||'-')}</div><div><strong>Rastreio:</strong> ${esc(o.tracking_code||'-')}</div><div><strong>Qtd total:</strong> ${num(o.total_quantity||0)}</div><div><strong>Valor:</strong> ${money(o.total_value||0)}</div></div><table><thead><tr><th>#</th><th>SKU / EAN</th><th>Produto</th><th>Qtd</th><th>Origem</th><th>Conferido</th><th>Observação</th></tr></thead><tbody>${rows || '<tr><td colspan="7">Sem itens.</td></tr>'}</tbody></table><div class="sign"><div class="line">Separação</div><div class="line">Conferência</div><div class="line">Expedição</div></div></body></html>`;
+  const w = window.open('', '_blank');
+  if(!w){ alert('Permita pop-ups para gerar o romaneio.'); return; }
+  w.document.open(); w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(), 500);
+  addAudit('Romaneio de pedido de venda gerado','pedido_venda',o.id,o.code);
+}
+
+function exportSalesOrdersCsv(){
+  const rows=[['Codigo','Pedido externo','Canal','Cliente','Documento','Endereco','NF','Chave','Status','Etapa','SKU','Produto','Qtd','Valor']];
+  (state.salesOrders||[]).forEach(o => (o.items||[]).forEach(i => rows.push([o.code,o.order_number,o.channel,o.customer_name,o.customer_doc,o.customer_address,o.invoice?.number,o.invoice?.accessKey,o.status,o.operational_status,i.sku,i.productName,i.quantity,i.saleValue])));
+  download('pedidos-venda.csv', rows.map(r=>r.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
 }
 
 function renderEvidenceCenter(){
