@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Devoluções NF-e | Conferência e Gestão</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%2338bdf8'/%3E%3Cstop offset='1' stop-color='%232563eb'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Ctext x='32' y='38' text-anchor='middle' font-family='Arial, sans-serif' font-size='24' font-weight='900' fill='white'%3ENF%3C/text%3E%3Cpath d='M18 46h28' stroke='white' stroke-width='4' stroke-linecap='round' opacity='.9'/%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%2338bdf8'/%3E%3Cstop offset='1' stop-color='%232563eb'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23g)'/%3E%3Ctext x='32' y='38' text-anchor='middle' font-family='Arial, sans-serif' font-size='24' font-weight='900' fill='white'%3ENF%3C/text%3E%3Cpath d='M18 46h28' stroke='white' stroke-width='4' stroke-linecap='round' opacity='.9'/%3E%3C/svg%3E">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <style>
@@ -2437,7 +2439,7 @@ function renderReturnedStock(){
     <div class="card" style="margin-top:18px">
       <div class="split">
         <div><h2>Estoque Devolvido</h2><p>Alterne a visão por SKU, item, devolução, localização ou destino final.</p></div>
-        <div class="row-actions"><button class="btn" onclick="exportStockCsv()">Exportar CSV</button><button class="btn primary" onclick="nav('transferencias')">Nova transferência</button></div>
+        <div class="row-actions"><button class="btn" onclick="exportStockCsv()">Exportar CSV</button><button class="btn success" onclick="exportAvailableStockTinyXlsx()">Baixar estoque Tiny</button><button class="btn primary" onclick="nav('transferencias')">Nova transferência</button></div>
       </div>
       <div class="tabs" style="margin-top:14px">
         ${['sku','item','devolucao','localizacao','destino'].map(m=>`<button class="${mode===m?'active':''}" onclick="state.filters.stockView='${m}'; save(); render()">${m==='sku'?'Por produto/SKU':m==='item'?'Por item':m==='devolucao'?'Por devolução':m==='localizacao'?'Por localização':'Por destino'}</button>`).join('')}
@@ -2482,6 +2484,68 @@ function exportStockCsv(){
   getReturnedStockRows().forEach(r=>rows.push([r.code,r.orderNumber,r.sku,r.product,r.physicalQuantity,r.availableQuantity,r.reservedQuantity,r.transferredQuantity,r.inTransitQuantity,r.writtenOffQuantity,r.discardedQuantity,r.currentBalance,r.finalDestination,r.location,r.totalValue]));
   download('estoque-devolvido.csv', rows.map(row=>row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
 }
+
+function getTinyAvailableStockRows(){
+  const vendableDestinations = ['Reabastecimento','Disponível para venda','Outlet'];
+  const map = new Map();
+  getReturnedStockRows()
+    .filter(r => Number(r.availableQuantity || 0) > 0)
+    .filter(r => vendableDestinations.includes(r.finalDestination || r.status))
+    .forEach(r => {
+      const sku = String(r.sku || '').trim();
+      if(!sku) return;
+      if(!map.has(sku)){
+        map.set(sku, {id:'', product:r.product || '', sku, ean:r.ean || '', location:'', quantity:0});
+      }
+      const current = map.get(sku);
+      current.quantity += Number(r.availableQuantity || 0);
+      if(!current.product && r.product) current.product = r.product;
+      if(!current.ean && r.ean) current.ean = r.ean;
+    });
+  return Array.from(map.values())
+    .sort((a,b) => String(a.sku).localeCompare(String(b.sku),'pt-BR'))
+    .map(r => [r.id, r.product, r.sku, r.ean, r.location, Number(r.quantity.toFixed(4))]);
+}
+
+function exportAvailableStockTinyXlsx(){
+  const rows = [['ID','Produto','Código (SKU)','GTIN/EAN','Localização','Saldo em estoque'], ...getTinyAvailableStockRows()];
+  if(rows.length === 1){ alert('Nenhum estoque disponível vendável para exportar.'); return; }
+  const fileName = `inventario_returnflow_tiny_${new Date().toISOString().slice(0,10)}.xlsx`;
+  const blob = buildTinyInventoryXlsx(rows);
+  downloadBlob(fileName, blob);
+}
+
+function buildTinyInventoryXlsx(rows){
+  const now = new Date().toISOString();
+  const sheetRows = rows.map((row, idx) => {
+    const r = idx + 1;
+    const cells = row.map((value, cidx) => xlsxCell(xlsxCol(cidx) + r, value, idx === 0));
+    return `<row r="${r}">${cells.join('')}</row>`;
+  }).join('');
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:F${rows.length}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols><col min="1" max="1" width="14" customWidth="1"/><col min="2" max="2" width="48" customWidth="1"/><col min="3" max="3" width="24" customWidth="1"/><col min="4" max="4" width="18" customWidth="1"/><col min="5" max="5" width="18" customWidth="1"/><col min="6" max="6" width="16" customWidth="1"/></cols>
+  <sheetData>${sheetRows}</sheetData>
+</worksheet>`;
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><workbookPr/><sheets><sheet name="Inventário de Estoque" sheetId="1" r:id="rId1"/></sheets><calcPr/></workbook>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/></Relationships>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  const themeXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Calibri"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>`;
+  return zipStore({'[Content_Types].xml':contentTypes,'_rels/.rels':rels,'xl/workbook.xml':workbookXml,'xl/_rels/workbook.xml.rels':workbookRels,'xl/worksheets/sheet1.xml':sheetXml,'xl/styles.xml':stylesXml,'xl/theme/theme1.xml':themeXml,'docProps/core.xml':`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:creator>ReturnFlow</dc:creator><cp:lastModifiedBy>ReturnFlow</cp:lastModifiedBy><dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created><dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified></cp:coreProperties>`,'docProps/app.xml':`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>ReturnFlow</Application></Properties>`});
+}
+function xlsxCell(ref, value, isHeader){ const style = isHeader ? ' s="1"' : ''; if(typeof value === 'number' && Number.isFinite(value)) return `<c r="${ref}"${style}><v>${value}</v></c>`; return `<c r="${ref}" t="inlineStr"${style}><is><t>${xmlEsc(value)}</t></is></c>`; }
+function xlsxCol(idx){ let s=''; idx++; while(idx>0){ const m=(idx-1)%26; s=String.fromCharCode(65+m)+s; idx=Math.floor((idx-1)/26); } return s; }
+function xmlEsc(v){ return String(v ?? '').replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+function downloadBlob(filename, blob){ const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
+function zipStore(files){ const enc = new TextEncoder(); const localParts=[], centralParts=[]; let offset=0; Object.entries(files).forEach(([name,content])=>{ const nameBytes=enc.encode(name), data=enc.encode(content), crc=crc32(data); const local=new Uint8Array(30+nameBytes.length); const dv=new DataView(local.buffer); dv.setUint32(0,0x04034b50,true); dv.setUint16(4,20,true); dv.setUint16(6,0,true); dv.setUint16(8,0,true); dv.setUint16(10,0,true); dv.setUint16(12,0,true); dv.setUint32(14,crc,true); dv.setUint32(18,data.length,true); dv.setUint32(22,data.length,true); dv.setUint16(26,nameBytes.length,true); dv.setUint16(28,0,true); local.set(nameBytes,30); localParts.push(local,data); const central=new Uint8Array(46+nameBytes.length); const cdv=new DataView(central.buffer); cdv.setUint32(0,0x02014b50,true); cdv.setUint16(4,20,true); cdv.setUint16(6,20,true); cdv.setUint16(8,0,true); cdv.setUint16(10,0,true); cdv.setUint16(12,0,true); cdv.setUint16(14,0,true); cdv.setUint32(16,crc,true); cdv.setUint32(20,data.length,true); cdv.setUint32(24,data.length,true); cdv.setUint16(28,nameBytes.length,true); cdv.setUint16(30,0,true); cdv.setUint16(32,0,true); cdv.setUint16(34,0,true); cdv.setUint16(36,0,true); cdv.setUint32(38,0,true); cdv.setUint32(42,offset,true); central.set(nameBytes,46); centralParts.push(central); offset += local.length + data.length; }); const centralSize = centralParts.reduce((s,p)=>s+p.length,0); const end=new Uint8Array(22); const edv=new DataView(end.buffer); edv.setUint32(0,0x06054b50,true); edv.setUint16(8,centralParts.length,true); edv.setUint16(10,centralParts.length,true); edv.setUint32(12,centralSize,true); edv.setUint32(16,offset,true); return new Blob([...localParts,...centralParts,end], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}); }
+function crc32(data){ let c = 0xffffffff; for(let i=0;i<data.length;i++){ c = (c >>> 8) ^ CRC_TABLE[(c ^ data[i]) & 0xff]; } return (c ^ 0xffffffff) >>> 0; }
+const CRC_TABLE = (()=>{ const table = new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xedb88320 ^ (c>>>1) : c>>>1; table[n]=c>>>0; } return table; })();
 
 function renderTransfers(){
   ensureStateExtensions();
