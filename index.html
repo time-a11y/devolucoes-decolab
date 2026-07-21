@@ -2476,11 +2476,13 @@ function renderReturnedStock(){
   const allRows = getReturnedStockRows();
   const rows = filterStockRows(allRows);
   const contestPending = allRows.filter(r => (r.finalDestination || r.status) === 'Contestação' && !r.physicalIdentified).length;
-  const totalQty = rows.reduce((s,r)=>s+r.physicalQuantity,0);
-  const available = rows.reduce((s,r)=>s+r.availableQuantity,0);
-  const blocked = rows.reduce((s,r)=>s+Math.max(0,r.currentBalance-r.availableQuantity),0);
-  const transferred = rows.reduce((s,r)=>s+r.transferredQuantity,0);
-  const value = rows.reduce((s,r)=>s+r.totalValue,0);
+  // Cards superiores devem mostrar o panorama geral do estoque devolvido, sem serem afetados por busca/filtros da tabela.
+  // Antes do filtro por status, esse painel não mudava ao pesquisar SKU/produto; o cálculo volta a usar allRows.
+  const totalQty = allRows.reduce((s,r)=>s+r.physicalQuantity,0);
+  const available = allRows.reduce((s,r)=>s+r.availableQuantity,0);
+  const blocked = allRows.reduce((s,r)=>s+Math.max(0,r.currentBalance-r.availableQuantity),0);
+  const transferred = allRows.reduce((s,r)=>s+r.transferredQuantity,0);
+  const value = allRows.reduce((s,r)=>s+r.totalValue,0);
   return `
     <section class="grid cols-4">
       ${metric('Unidades devolvidas', num(totalQty), 'Quantidade física total')}
