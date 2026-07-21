@@ -3576,12 +3576,36 @@ function renderSettings(){
         <div class="row-actions" style="margin-top:14px">
           <button class="btn" onclick="optimizeLocalStorage(true)">Otimizar armazenamento local</button>
           <button class="btn" onclick="showLocalStorageUsage()">Ver uso local</button>
-          <button class="btn" onclick="exportEvidenceCsv()">Relatório de evidências CSV</button>
-          <button class="btn" onclick="exportEvidenceBackupJson()">Backup com evidências locais</button>
           <button class="btn danger" onclick="resetApp()">Resetar dados locais</button>
         </div>
       </div>
     </section>
+
+    <div class="card" style="margin-top:18px">
+      <div class="split">
+        <div>
+          <h2>Pacote de segurança dos dados</h2>
+          <p>Backup, restauração, exportações e diagnóstico para proteger as devoluções já processadas antes de novos upgrades.</p>
+        </div>
+        <span class="status ok">Recomendado antes de atualizar</span>
+      </div>
+      <div class="grid cols-4" style="margin-top:14px">
+        <div class="item-card"><strong>Devoluções</strong><p>${num((state.returns||[]).filter(r=>!r.isDeleted).length)} registro(s)</p></div>
+        <div class="item-card"><strong>Estoque</strong><p>${num(getReturnedStockRows().length)} linha(s)</p></div>
+        <div class="item-card"><strong>Evidências</strong><p>${num(collectEvidenceRows().length)} anexo(s)</p></div>
+        <div class="item-card"><strong>Auditoria</strong><p>${num((state.audit||[]).length)} evento(s)</p></div>
+      </div>
+      <div class="row-actions" style="margin-top:16px">
+        <button class="btn primary" onclick="exportSecurityBackupJson(false)">Backup completo leve</button>
+        <button class="btn" onclick="exportEvidenceBackupJson()">Backup com evidências locais</button>
+        <button class="btn" onclick="triggerRestoreBackup()">Restaurar backup</button>
+        <button class="btn" onclick="exportAllSecurityReports()">Exportar relatórios CSV</button>
+        <button class="btn" onclick="runIntegrityDiagnostics(true)">Diagnóstico de integridade</button>
+      </div>
+      <input id="restore-backup-input" type="file" accept="application/json,.json" style="display:none" onchange="restoreBackupFromFile(this.files && this.files[0]); this.value=''">
+      <p class="hint" style="margin-top:12px">Use o backup leve para proteger dados operacionais sem imagens pesadas. Use o backup com evidências locais quando precisar preservar também os arquivos salvos na máquina/navegador.</p>
+    </div>
+
     <div class="card" style="margin-top:18px">
       <h2>Integrações futuras</h2>
       <div class="grid cols-4">
@@ -3594,7 +3618,6 @@ function renderSettings(){
   `;
 }
 
-
 function optimizeLocalStorage(showAlert=true){
   const removed = purgeHeavyLocalStateReferences();
   try{ save(); }catch(e){ console.warn(e); }
@@ -3603,13 +3626,173 @@ function optimizeLocalStorage(showAlert=true){
   render();
 }
 
-
 function showLocalStorageUsage(){
   const raw = localStorage.getItem(APP_KEY) || '';
   const kb = Math.round((raw.length * 2) / 1024);
   const evidenceCount = collectEvidenceRows().length;
   const localCount = collectEvidenceRows().filter(e=>e.local_blob_id).length;
   alert(`Uso aproximado do localStorage: ${kb} KB\nEvidências registradas: ${evidenceCount}\nArquivos locais em IndexedDB: ${localCount}\n\nObs.: imagens locais não ficam mais dentro do localStorage.`);
+}
+
+function exportSecurityBackupJson(includeStateOnly=false){
+  optimizeLocalStorage(false);
+  const diagnostics = buildIntegrityDiagnostics();
+  const backup = {
+    backup_type:'returnflow_security_backup_v1',
+    exported_at:nowIso(),
+    app_key:APP_KEY,
+    app_name:'ReturnFlow',
+    includes_local_evidence_files:false,
+    warning:'Backup operacional leve: preserva dados, histórico, estoque, pedidos, transferências e metadados de evidências. Arquivos locais ficam no backup separado de evidências.',
+    summary:diagnostics.summary,
+    state:sanitizeForLocalStorage(buildPersistPayload())
+  };
+  download(`returnflow-backup-operacional-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(backup,null,2), 'application/json;charset=utf-8');
+  addAudit('Backup operacional exportado','segurança','backup',`Devoluções: ${backup.summary.returns} · Evidências: ${backup.summary.evidences}`);
+}
+
+function triggerRestoreBackup(){
+  const input = document.getElementById('restore-backup-input');
+  if(input) input.click();
+}
+
+function normalizeBackupState(imported){
+  if(!imported) return null;
+  const importedState = imported.state || imported;
+  if(!importedState || typeof importedState !== 'object') return null;
+  const restored = {...initialState, ...importedState, pendingInvoice:null, pendingXmlText:''};
+  restored.users = Array.isArray(restored.users) && restored.users.length ? restored.users : DEFAULT_USERS;
+  restored.returns = Array.isArray(restored.returns) ? restored.returns : [];
+  restored.audit = Array.isArray(restored.audit) ? restored.audit : [];
+  restored.rules = {...initialState.rules, ...(restored.rules || {})};
+  restored.filters = {...initialState.filters, ...(restored.filters || {})};
+  restored.warehouses = Array.isArray(restored.warehouses) ? restored.warehouses : [];
+  restored.transfers = Array.isArray(restored.transfers) ? restored.transfers : [];
+  restored.salesOrders = Array.isArray(restored.salesOrders) ? restored.salesOrders : [];
+  return restored;
+}
+
+async function restoreBackupFromFile(file){
+  if(!file) return;
+  if(!confirm('Restaurar este backup vai substituir os dados atuais salvos neste navegador. Antes de continuar, gere um backup do estado atual. Deseja continuar?')) return;
+  try{
+    const text = await file.text();
+    const imported = JSON.parse(text);
+    const restored = normalizeBackupState(imported);
+    if(!restored){ alert('Arquivo de backup inválido ou incompatível.'); return; }
+    state = restored;
+    purgeHeavyLocalStateReferences();
+    ensureStateExtensions();
+    addAudit('Backup restaurado','segurança','backup',file.name || 'arquivo JSON');
+    save();
+    if(Array.isArray(imported.local_evidence_files) && imported.local_evidence_files.length){
+      if(confirm(`Este backup possui ${imported.local_evidence_files.length} arquivo(s) local(is) de evidência. Deseja restaurar também esses arquivos no IndexedDB deste navegador?`)){
+        await restoreLocalEvidenceFiles(imported.local_evidence_files);
+      }
+    }
+    alert('Backup restaurado com sucesso. A tela será atualizada.');
+    render();
+  }catch(e){
+    console.error(e);
+    alert('Não foi possível restaurar o backup. Verifique se o arquivo JSON está correto.');
+  }
+}
+
+async function restoreLocalEvidenceFiles(files){
+  let restored = 0;
+  for(const f of files){
+    try{
+      if(!f.local_blob_id || !f.data_url) continue;
+      const blob = dataUrlToBlob(f.data_url);
+      await saveLocalEvidenceBlob(f.local_blob_id, new File([blob], f.name || f.local_blob_id, {type:f.type || blob.type || 'application/octet-stream'}));
+      restored++;
+    }catch(e){ console.warn('Falha ao restaurar evidência local', f, e); }
+  }
+  addAudit('Evidências locais restauradas','segurança','IndexedDB',`${restored} arquivo(s) restaurado(s)`);
+  save();
+}
+
+function dataUrlToBlob(dataUrl){
+  const parts = String(dataUrl || '').split(',');
+  const meta = parts[0] || '';
+  const b64 = parts[1] || '';
+  const type = (meta.match(/data:([^;]+)/) || [])[1] || 'application/octet-stream';
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], {type});
+}
+
+function exportAllSecurityReports(){
+  exportReturnsCsv();
+  exportStockCsv();
+  exportAuditCsv();
+  exportEvidenceCsv();
+  exportIntegrityDiagnosticsCsv();
+  addAudit('Relatórios de segurança exportados','segurança','csv','Devoluções, estoque, auditoria, evidências e integridade');
+  save();
+}
+
+function buildIntegrityDiagnostics(){
+  const activeReturns = getActiveReturns();
+  const stockRows = getReturnedStockRows();
+  const evidenceRows = collectEvidenceRows();
+  const issues = [];
+  const seenKeys = new Map();
+  activeReturns.forEach(r => {
+    const key = cleanDigits(r.invoice?.accessKey || '');
+    if(key){
+      if(seenKeys.has(key)) issues.push({level:'Atenção', type:'NF-e duplicada', entity:r.code, detail:`Também vinculada a ${seenKeys.get(key)}`});
+      else seenKeys.set(key, r.code);
+    }
+    if(!(r.items||[]).length) issues.push({level:'Atenção', type:'Devolução sem itens', entity:r.code, detail:'Processo ativo sem itens vinculados'});
+    (r.items||[]).forEach(i => {
+      if((i.destination || '') === 'Contestação' && !i.physical_identified) issues.push({level:'Pendente', type:'Contestação sem SKU física', entity:r.code, detail:i.sku || i.description || i.id});
+      if(Number(itemQty(i) || 0) <= 0) issues.push({level:'Atenção', type:'Quantidade física zerada', entity:r.code, detail:i.sku || i.description || i.id});
+      const critical = ['Contestação','Descarte','Perda operacional','Quarentena'].includes(i.destination || '');
+      if(critical && !(i.evidences || []).length) issues.push({level:'Crítico', type:'Item crítico sem evidência', entity:r.code, detail:`${i.sku || '-'} · ${i.destination || '-'}`});
+    });
+  });
+  const stockNegative = stockRows.filter(r => Number(r.currentBalance || 0) < 0 || Number(r.availableQuantity || 0) < 0);
+  stockNegative.forEach(r => issues.push({level:'Crítico', type:'Saldo negativo', entity:r.code, detail:`${r.sku} · saldo ${r.currentBalance} · disponível ${r.availableQuantity}`}));
+  const brokenEvidence = evidenceRows.filter(e => !e.local_blob_id && !evidenceRemoteUrl(e));
+  brokenEvidence.forEach(e => issues.push({level:'Atenção', type:'Evidência sem arquivo acessível', entity:e.returnCode || e.returnId, detail:`${e.sku || '-'} · ${e.name || e.category || '-'}`}));
+  return {
+    summary:{
+      returns:activeReturns.length,
+      stock_rows:stockRows.length,
+      stock_available:stockRows.reduce((s,r)=>s+Number(r.availableQuantity||0),0),
+      evidences:evidenceRows.length,
+      local_evidences:evidenceRows.filter(e=>e.local_blob_id).length,
+      transfers:(state.transfers||[]).length,
+      sales_orders:(state.salesOrders||[]).length,
+      audit_events:(state.audit||[]).length,
+      issues:issues.length
+    },
+    issues
+  };
+}
+
+function runIntegrityDiagnostics(showAlert=true){
+  const d = buildIntegrityDiagnostics();
+  const critical = d.issues.filter(i=>i.level==='Crítico').length;
+  const pending = d.issues.filter(i=>i.level==='Pendente').length;
+  const warn = d.issues.filter(i=>i.level==='Atenção').length;
+  if(showAlert){
+    const preview = d.issues.slice(0,12).map(i=>`- ${i.level}: ${i.type} · ${i.entity} · ${i.detail}`).join('\n');
+    alert(`Diagnóstico de integridade\n\nDevoluções: ${d.summary.returns}\nEstoque: ${d.summary.stock_rows} linha(s)\nEvidências: ${d.summary.evidences}\nProblemas encontrados: ${d.summary.issues}\nCríticos: ${critical}\nPendentes: ${pending}\nAtenção: ${warn}\n\n${preview || 'Nenhum problema relevante encontrado.'}${d.issues.length>12?'\n\nExibindo apenas os 12 primeiros. Exporte o CSV para ver todos.':''}`);
+  }
+  addAudit('Diagnóstico de integridade executado','segurança','diagnóstico',`${d.summary.issues} apontamento(s)`);
+  save();
+  return d;
+}
+
+function exportIntegrityDiagnosticsCsv(){
+  const d = buildIntegrityDiagnostics();
+  const rows = [['Nivel','Tipo','Entidade','Detalhe']];
+  d.issues.forEach(i => rows.push([i.level,i.type,i.entity,i.detail]));
+  if(rows.length === 1) rows.push(['OK','Sem apontamentos','-','Nenhum problema relevante encontrado']);
+  download('diagnostico-integridade-returnflow.csv', rows.map(row=>row.map(csvEscape).join(';')).join('\n'), 'text/csv;charset=utf-8');
 }
 
 function updateRule(key,value){
